@@ -138,7 +138,9 @@
         -- SELECT * FROM orders; - Only returns rows for this task
     ```
 
-This will provide
+12. Companies also feel that their data should not be exposed to an external cloud LLM provider because it's prod DB and data can get compormised so is there a way to mask data before any inference LLM api call
+
+This(1-12) will provide
 - Least Privilege
 - Tracebility
 - Resilience
