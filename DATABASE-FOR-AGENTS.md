@@ -137,3 +137,11 @@
         -- SET LOCAL app. current_task_id = 'task-abc-123';
         -- SELECT * FROM orders; - Only returns rows for this task
     ```
+
+This will provide
+- Least Privilege
+- Tracebility
+- Resilience
+- Isolation
+- Legibility
+- Safety
