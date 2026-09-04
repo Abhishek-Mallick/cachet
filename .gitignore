@@ -1,0 +1,40 @@
+# Research & internal planning docs — kept local, not part of the public product
+docs/
+
+# Build output
+/bin/
+/dist/
+/target/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+
+# Rust
+Cargo.lock.orig
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local infra state
+.data/
+data/
+*.db
+*.sqlite
+
+# Benchmark artifacts (regenerate; don't version)
+bench/results/
+*.prof
+*.pprof
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
