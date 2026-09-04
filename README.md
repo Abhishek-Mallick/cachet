@@ -5,11 +5,6 @@
   that continuously proves its own correctness — and reports it as a number.</strong>
 </p>
 
-<p align="center">
-  <em>🚧 Early development. Architecture and consistency model are settled; implementation is in progress.
-  See <a href="#roadmap">Roadmap</a> for honest status.</em>
-</p>
-
 ---
 
 ## The problem
@@ -178,10 +173,6 @@ Cachet builds on published work. Credit where it's owed:
   tracing, and the demonstration that it's worth several orders of magnitude. *Its verifier is named
   Polaris; Sextant is the instrument that measures against it.*
 - **Riak** — per-request tunable consistency, an idea the industry dropped and shouldn't have
-
-## License
-
-TBD
 
 [cf1]: https://www.uber.com/gb/en/blog/how-uber-serves-over-40-million-reads-per-second-using-an-integrated-cache/
 [cf2]: https://www.uber.com/us/en/blog/how-uber-serves-over-150-million-reads/
