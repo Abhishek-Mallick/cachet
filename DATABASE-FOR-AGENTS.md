@@ -54,21 +54,23 @@
         requires_human_review BOOLEAN DEFAULT true
         ) :
     ```
+    How about debug your DB like debugging code
 
 6. Have a dedicated connection pooling config for your agents - Connections are brief
     Because one agent might spawn out to 5 different sub agents to query or do some task
         N concurrent requests which might be 10N at prod with higher traffic
     ```
         agent_engine = create_engine(
-        DATABASE_URL,
-        poo1_size=10,               # base pool for agents
-        max_overflow=5              # burst capacity
-        pool_timeout-3,             # fail fast, not queue -- prevents cascading failure
-        pool_recycle=300,           # recycle every 5 min
-        pool_pre_ping=True,         # validate before checkout
-        connect_args={
-            "options": "-c statement_timeout=5000 -c idle_in_transaction_session_timeout=10000"
-        }
+            DATABASE_URL,
+            poo1_size=10,               # base pool for agents
+            max_overflow=5              # burst capacity
+            pool_timeout-3,             # fail fast, not queue -- prevents cascading failure
+            pool_recycle=300,           # recycle every 5 min
+            pool_pre_ping=True,         # validate before checkout
+            connect_args={
+                "options": "-c statement_timeout=5000 -c idle_in_transaction_session_timeout=10000"
+            }
+        );
     ```
 
 7. Never Hold transaction during "Thinking"
@@ -101,4 +103,37 @@
                 I"step={agent_ctx['step']} */ {statement}"
             )
         return statement, parameters
-```
+    ```
+    if you get the process or agent id which is generating wrong queries again and again you keep loop to fix and add evals to it
+
+9. Active Circuit Breakers
+    Agents need real-time circuit breakers. Id an agent triggers failures or timeouts in a short window, freeze it automatically
+    ```
+        -- Monitoring for "Looping Agents"
+        SELECT
+            (regexp_match(query, 'agent_id=([^,]+) ')) [1] AS agent_id,
+            count (*) FILTER (where state = 'failed') as failure_count
+        FROM pg_stat_activity
+        WHERE query LIKE '%agent_id=%'
+        GROUP BY 1
+        HAVING count (*) > 10;
+    ```
+    Better to chop off agent which is running wrong queries
+
+10. Schema should be readbale by agent who has new knowledge to the system so usr_id should be customer_id
+    Create a agent legible schema
+        Even keeping casting to a level that something like fulfillment status should be an enum rather than just a text
+    
+11. Scope the blast radius for an agent how much it can access and what can be the worst it can do
+    Guadrail on basis of RLS - Row level Security
+    ```
+        ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+        -- Limit access based on a session variable
+        CREATE POLICY agent_task_isolation ON orders
+            USING (task_id = current_setting('app.current_task_id') ::uuid);
+
+        -- In your application code:
+        -- SET LOCAL app. current_task_id = 'task-abc-123';
+        -- SELECT * FROM orders; - Only returns rows for this task
+    ```
