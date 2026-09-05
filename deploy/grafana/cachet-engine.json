@@ -1,0 +1,135 @@
+{
+  "uid": "cachet-engine",
+  "title": "Cachet — Engine",
+  "tags": ["cachet"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Guarantees in force",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Consistency settings",
+      "description": "The settings that change what Cachet PROMISES, read from the running process rather than from a config repository. CONSISTENCY.md §9 requires these to be visible: a guarantee nobody can read off a dashboard is one nobody can verify was in force during an incident. Durations are in seconds.",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cachet-prometheus" },
+      "targets": [
+        {
+          "expr": "cachet_guarantee_setting",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true, "component": true } } }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by method",
+      "description": "The R in RED. Every request path emits these; a path without them cannot be debugged in production.",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cachet-prometheus" },
+      "targets": [
+        { "expr": "sum by (method) (rate(cachet_requests_total[1m]))", "legendFormat": "{{method}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors by gRPC code",
+      "description": "Labelled by code rather than as a single error counter, because 'a client sent nonsense' and 'a shard is down' are opposite operational problems that one line would merge into something useless.",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cachet-prometheus" },
+      "targets": [
+        { "expr": "sum by (code) (rate(cachet_requests_total{code!=\"OK\"}[1m]))", "legendFormat": "{{code}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Read latency percentiles",
+      "description": "Computed from the histogram, never averaged. Buckets start at 100µs because a cache hit's entire budget is a few hundred microseconds; Prometheus' 5ms default would put every hit in the first bucket and hide the number this project is judged on.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "cachet-prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(cachet_request_duration_seconds_bucket{method=\"Get\"}[1m])))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(cachet_request_duration_seconds_bucket{method=\"Get\"}[1m])))", "legendFormat": "p99", "refId": "B" },
+        { "expr": "histogram_quantile(0.999, sum by (le) (rate(cachet_request_duration_seconds_bucket{method=\"Get\"}[1m])))", "legendFormat": "p99.9", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2 } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Write latency percentiles",
+      "description": "Write p99 is the comparison point Phase 4b needs: adaptive admission must lower it, because every write to a cached key pays invalidation.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "cachet-prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(cachet_request_duration_seconds_bucket{method=\"Put\"}[1m])))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(cachet_request_duration_seconds_bucket{method=\"Put\"}[1m])))", "legendFormat": "p99", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2 } }, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Saturation",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests in flight",
+      "description": "Concurrency actually being carried. A rising line with flat throughput means requests are queueing, which is the shape a stampede makes.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "cachet-prometheus" },
+      "targets": [
+        { "expr": "sum by (method) (cachet_requests_in_flight)", "legendFormat": "{{method}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 20 } }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "Success rate (5m)",
+      "description": "Diagnostic, not a headline. The headline number for this project is the consistency SLO, which arrives with Sextant in Phase 4c.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "cachet-prometheus" },
+      "targets": [
+        { "expr": "sum(rate(cachet_requests_total{code=\"OK\"}[5m])) / clamp_min(sum(rate(cachet_requests_total[5m])), 0.0001)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "orange", "value": 0.99 },
+            { "color": "green", "value": 0.999 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    }
+  ]
+}

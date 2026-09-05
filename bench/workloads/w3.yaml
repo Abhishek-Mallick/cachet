@@ -1,0 +1,17 @@
+# W3 — the stampede. Backs the lease claim from Phase 4a.
+#
+# Every request targets one key. Invalidate it, then release ten thousand concurrent readers: without
+# leases, all of them reach the database. The headline graph is origin QPS over time, and the
+# assertion is about the ORIGIN, not client latency — client latency may barely move while database
+# load collapses (docs/cachet-benchmarking.md §3.6, §10).
+id: W3
+name: Stampede
+distribution: hot
+hot_key: 1
+read_fraction: 1.0
+rows: 10000
+rate: 10000
+workers: 512
+warmup: 10s
+measure: 60s
+seed: 42

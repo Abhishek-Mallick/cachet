@@ -1,6 +1,10 @@
 apiVersion: 1
 datasources:
   - name: Prometheus
+    # A stable uid is required, not cosmetic: the versioned dashboards in deploy/grafana reference
+    # this datasource by uid. Letting Grafana generate a random one leaves every panel unable to
+    # resolve its datasource on a fresh stack.
+    uid: cachet-prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

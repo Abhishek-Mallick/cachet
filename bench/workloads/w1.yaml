@@ -1,0 +1,16 @@
+# W1 — the control.
+#
+# Uniform keys mean almost no key is ever hot, so the cache hit rate collapses toward zero and every
+# caching effect disappears. That is the point: W1 exists to show that the effects seen under W2 come
+# from skew rather than from the harness. It is a sanity check and never a headline number
+# (docs/cachet-benchmarking.md §3.5, §5).
+id: W1
+name: Uniform control
+distribution: uniform
+read_fraction: 0.95
+rows: 10000
+rate: 2000
+workers: 64
+warmup: 60s
+measure: 300s
+seed: 42

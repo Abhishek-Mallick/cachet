@@ -1,0 +1,18 @@
+# W2 — the primary workload. Every phase row in the README comes from this file.
+#
+# θ=0.99 is the YCSB default and the standard for this project: a few keys take most of the traffic,
+# which is what makes a cache worth having and a stampede possible to produce at all.
+#
+# The parameters below are the ones that must stay CONSTANT across phases. A row you cannot compare
+# to the row above it is decoration (docs/cachet-benchmarking.md §1, §5).
+id: W2
+name: Realistic read-heavy
+distribution: zipfian
+theta: 0.99
+read_fraction: 0.95
+rows: 10000
+rate: 2000
+workers: 64
+warmup: 60s
+measure: 300s
+seed: 42

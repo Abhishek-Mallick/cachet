@@ -67,9 +67,18 @@ lint: ## Vet + lint, including tagged test files (build plan §7.2)
 	golangci-lint run --build-tags=integration,e2e,chaos
 
 .PHONY: tidy
-tidy: ## go mod tidy, verified clean
-	$(GO) mod tidy
-	git diff --exit-code go.mod go.sum
+tidy: ## go mod tidy, verified to be a no-op
+	@set -euo pipefail; \
+	before=$$(mktemp -d); \
+	cp go.mod go.sum "$$before/"; \
+	$(GO) mod tidy; \
+	if ! diff -q go.mod "$$before/go.mod" >/dev/null || ! diff -q go.sum "$$before/go.sum" >/dev/null; then \
+	  echo "go.mod/go.sum were not tidy; the changes have been applied — review and commit them:"; \
+	  diff -u "$$before/go.mod" go.mod || true; \
+	  rm -rf "$$before"; exit 1; \
+	fi; \
+	rm -rf "$$before"; \
+	echo "go.mod and go.sum are tidy"
 
 .PHONY: vuln
 vuln: ## Known-vulnerability scan
