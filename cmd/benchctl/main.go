@@ -33,17 +33,19 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: benchctl <run|report|guard> [flags]")
+		return errors.New("usage: benchctl <run|probe|report|guard> [flags]")
 	}
 	switch os.Args[1] {
 	case "run":
 		return runBenchmark(os.Args[2:])
 	case "report":
 		return report(os.Args[2:])
+	case "probe":
+		return probeStaleness(os.Args[2:])
 	case "guard":
 		return guard(os.Args[2:])
 	default:
-		return fmt.Errorf("unknown command %q (want run, report or guard)", os.Args[1])
+		return fmt.Errorf("unknown command %q (want run, probe, report or guard)", os.Args[1])
 	}
 }
 
@@ -60,6 +62,7 @@ func runBenchmark(args []string) error {
 		warmup       = fs.Duration("warmup", 0, "override the workload's warmup")
 		measure      = fs.Duration("measure", 0, "override the workload's measure window")
 		rate         = fs.Int("rate", 0, "override the workload's rate")
+		metricsURL   = fs.String("metrics", "http://127.0.0.1:9100/metrics", "engine metrics endpoint; empty to skip")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -107,14 +110,38 @@ func runBenchmark(args []string) error {
 		workload.Warmup, workload.Measure, *runs)
 
 	metrics := make([]harness.RunMetrics, 0, *runs)
+	var cacheAgg harness.CacheMetrics
+	var originAgg harness.OriginMetrics
+
 	for i := 1; i <= *runs; i++ {
+		// The cache and origin counters are read from the ENGINE, before and after each run. The
+		// load generator cannot observe them: it sees latency, while the claim being tested is
+		// about database load (benchmarking doc §3.6).
+		before, scrapeErr := scrapeIfConfigured(ctx, *metricsURL)
+		if scrapeErr != nil {
+			return scrapeErr
+		}
+
+		start := time.Now()
 		m, err := singleRun(ctx, client, workload)
 		if err != nil {
 			return fmt.Errorf("run %d: %w", i, err)
 		}
-		fmt.Printf("  run %d/%d  %s  throughput %.0f rps  errors %d  behind %d\n",
-			i, *runs, m.Read, m.Throughput, m.Errors, m.Behind)
+		window := time.Since(start) - workload.Warmup
+
+		after, scrapeErr := scrapeIfConfigured(ctx, *metricsURL)
+		if scrapeErr != nil {
+			return scrapeErr
+		}
+
+		hitRate := harness.HitRate(before, after)
+		originQPS := harness.OriginQPS(before, after, window)
+		fmt.Printf("  run %d/%d  %s  throughput %.0f rps  hit %.1f%%  origin %.0f qps  errors %d  behind %d\n",
+			i, *runs, m.Read, m.Throughput, hitRate*100, originQPS, m.Errors, m.Behind)
+
 		metrics = append(metrics, m)
+		cacheAgg.HitRate += hitRate / float64(*runs)
+		originAgg.QPS += originQPS / float64(*runs)
 	}
 
 	rep := harness.Report{
@@ -126,6 +153,8 @@ func runBenchmark(args []string) error {
 		Params:        workload.Params(),
 		Runs:          *runs,
 		Client:        harness.Aggregate(metrics),
+		Cache:         cacheAgg,
+		Origin:        originAgg,
 	}
 
 	path, err := rep.Save(*out)
@@ -189,6 +218,21 @@ func singleRun(ctx context.Context, client cachetv1.CacheServiceClient, w harnes
 	}, nil
 }
 
+// scrapeIfConfigured reads the engine's counters, or returns zeros when no endpoint was given.
+//
+// An unreachable endpoint is an error rather than a silent zero: publishing a 0% hit rate as though
+// it had been measured is worse than publishing nothing at all.
+func scrapeIfConfigured(ctx context.Context, url string) (harness.Counters, error) {
+	if url == "" {
+		return harness.Counters{}, nil
+	}
+	c, err := harness.Scrape(ctx, url)
+	if err != nil {
+		return harness.Counters{}, fmt.Errorf("%w\n(pass -metrics=\"\" to run without cache and origin measurements)", err)
+	}
+	return c, nil
+}
+
 // payloadBytes matches the fixture's row size so writes do not change the data shape mid-run.
 const payloadBytes = 256
 
@@ -198,6 +242,146 @@ func payload() []byte {
 		b[i] = byte('a' + i%26)
 	}
 	return b
+}
+
+// probeStaleness measures how long a committed write stays invisible to a session other than the
+// writer's.
+//
+// This is the metric each phase of the invalidation work is judged on, and the protocol is the one
+// in docs/cachet-benchmarking.md §7 reduced to its Phase 1 essentials: a writer advances a sequence
+// on a probe key, and a reader holding NO session token polls until it observes that sequence. The
+// gap between commit and observation is the staleness.
+//
+// Using a fresh session for the reader is the whole point. The writer's own session would see its
+// write immediately via the watermark, which measures the guarantee that already works rather than
+// the one that does not.
+func probeStaleness(args []string) error {
+	fs := flag.NewFlagSet("probe", flag.ExitOnError)
+	var (
+		target   = fs.String("target", "tcp://127.0.0.1:9090", "engine address")
+		phase    = fs.String("phase", "1-ttl", "phase id recorded in the results file")
+		out      = fs.String("out", "bench/results", "results directory")
+		host     = fs.String("host", "", "environment label")
+		samples  = fs.Int("samples", 50, "number of writes to probe")
+		interval = fs.Duration("interval", 200*time.Millisecond, "delay between probes")
+		giveUp   = fs.Duration("give-up", 45*time.Second, "how long to wait for a write to become visible")
+		pollGap  = fs.Duration("poll", 100*time.Millisecond, "delay between reads while waiting")
+		ttl      = fs.Duration("ttl", 0, "the engine's configured entry TTL, recorded for context")
+		keyBase  = fs.Uint64("key-base", 5000, "first probe key id; MUST exist in the seeded fixture")
+	)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *host == "" {
+		return errors.New("-host is required: a number without its environment is not reproducible")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	client, closeConn, err := dial(*target)
+	if err != nil {
+		return err
+	}
+	defer closeConn()
+
+	rec := harness.NewRecorder()
+	var observations, notConverged int64
+
+	fmt.Printf("probing staleness: %d writes, giving up after %s each\n", *samples, *giveUp)
+
+	for i := 0; i < *samples; i++ {
+		if ctx.Err() != nil {
+			break
+		}
+		key := harness.KeyFor(*keyBase + uint64(i%16))
+		want := fmt.Sprintf("seq-%d", i)
+
+		// Warm the entry from a reader's point of view first, so the probe measures the time to
+		// REPLACE a cached value. Measuring a cold key would time a cache fill, not staleness.
+		warm, err := client.Get(ctx, &cachetv1.GetRequest{Key: key})
+		if err != nil {
+			return fmt.Errorf("warm read %s: %w", key, err)
+		}
+		// A probe key that does not exist yet caches nothing, because negative caching does not
+		// arrive until Phase 2. Every read would then go straight to the database and the probe
+		// would report a staleness of one round trip — a number that looks excellent and measures
+		// nothing. Refusing to start is the only safe response.
+		if !warm.GetFound() {
+			return fmt.Errorf(
+				"probe key %s does not exist in the fixture; run `make seed` or pass a -key-base "+
+					"inside the seeded range (a missing key would silently measure a cache fill "+
+					"rather than staleness)", key)
+		}
+
+		commit := time.Now()
+		if _, err := client.Put(ctx, &cachetv1.PutRequest{
+			Key:    key,
+			Record: &cachetv1.Record{TenantId: 1, Payload: []byte(want)},
+		}); err != nil {
+			return fmt.Errorf("probe write %s: %w", key, err)
+		}
+		observations++
+
+		converged := false
+		for time.Since(commit) < *giveUp {
+			// No session token: this is a different session from the writer, which is the only way
+			// to measure read-OTHERS-writes rather than read-own-writes.
+			resp, err := client.Get(ctx, &cachetv1.GetRequest{Key: key})
+			if err != nil {
+				return fmt.Errorf("probe read %s: %w", key, err)
+			}
+			if string(resp.GetRecord().GetPayload()) == want {
+				rec.Record(time.Since(commit))
+				converged = true
+				break
+			}
+			select {
+			case <-time.After(*pollGap):
+			case <-ctx.Done():
+				return nil
+			}
+		}
+		if !converged {
+			notConverged++
+		}
+
+		select {
+		case <-time.After(*interval):
+		case <-ctx.Done():
+		}
+	}
+
+	summary := rec.Summarise()
+	rep := harness.Report{
+		SchemaVersion: harness.SchemaVersion,
+		Phase:         *phase,
+		Workload:      "W2",
+		Env:           harness.CurrentEnv(*host, images(ctx), commit(ctx)),
+		Runs:          1,
+		Staleness: harness.StalenessMetrics{
+			Observed:     summary,
+			Observations: observations,
+			NotConverged: notConverged,
+			TTLSeconds:   int(ttl.Seconds()),
+		},
+	}
+
+	fmt.Printf("\nstaleness: %s\n", summary)
+	fmt.Printf("observations %d · never converged %d\n", observations, notConverged)
+	if notConverged > 0 {
+		// Percentiles over only the writes that became visible would be flattering: the ones that
+		// did not are the worst cases.
+		fmt.Printf("NOTE: the percentiles above EXCLUDE the %d writes that never became visible.\n",
+			notConverged)
+	}
+
+	path, err := rep.Save(*out)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s\n", path)
+	return nil
 }
 
 func report(args []string) error {

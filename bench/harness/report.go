@@ -63,6 +63,27 @@ type CacheMetrics struct {
 	MemoryBytes int64   `json:"memory_bytes"`
 }
 
+// StalenessMetrics is how long a committed write stayed invisible to a session other than the
+// writer's.
+//
+// This is the number that motivates each phase of the invalidation work. In Phase 1 it is bounded
+// only by the entry TTL and is deliberately terrible; publishing it is what makes the Phase 2
+// improvement mean something (benchmarking doc §9).
+type StalenessMetrics struct {
+	// Observed holds the distribution of convergence times, in microseconds.
+	Observed Latencies `json:"observed"`
+
+	// Observations is every write probed, including the ones that never became visible.
+	Observations int64 `json:"observations"`
+
+	// NotConverged counts writes still invisible when the probe gave up. They are excluded from the
+	// percentiles — which is exactly why the count must be published alongside them: they are the
+	// worst cases, and dropping them silently improves the number.
+	NotConverged int64 `json:"not_converged"`
+
+	TTLSeconds int `json:"ttl_s"`
+}
+
 // Params records the run parameters, so a number can be reproduced rather than merely believed.
 type Params struct {
 	WarmupSeconds  int     `json:"warmup_s"`
@@ -103,9 +124,10 @@ type Report struct {
 	Params Params `json:"params"`
 	Runs   int    `json:"runs"`
 
-	Client ClientMetrics `json:"client"`
-	Cache  CacheMetrics  `json:"cache"`
-	Origin OriginMetrics `json:"origin"`
+	Client    ClientMetrics    `json:"client"`
+	Cache     CacheMetrics     `json:"cache"`
+	Origin    OriginMetrics    `json:"origin"`
+	Staleness StalenessMetrics `json:"staleness"`
 }
 
 // Aggregate combines several runs into one published result.
@@ -256,17 +278,33 @@ func LoadReports(dir string) ([]Report, error) {
 	return out, nil
 }
 
-// Latest keeps only the most recent report per (phase, workload).
+// Latest reduces a set of reports to one per (phase, workload).
 //
 // Rerunning a phase replaces its row rather than adding a second one; otherwise the table becomes a
 // history nobody can read.
+//
+// Reports are also MERGED section by section, because a phase's numbers are produced by different
+// commands into different files: `benchctl run` measures latency, hit rate and origin load, while
+// `benchctl probe` measures staleness. Keeping only the newest file would let a staleness probe
+// silently erase the latency numbers for the same phase — the row would lose whichever column was
+// measured first, and nobody would notice until the README looked oddly empty.
+//
+// The merge only ever fills in sections the newer report did not measure AT ALL. It never
+// resurrects a superseded value: re-running a phase replaces everything it re-measured.
 func Latest(reports []Report) []Report {
-	best := make(map[string]Report, len(reports))
-	for _, r := range reports {
+	ordered := make([]Report, len(reports))
+	copy(ordered, reports)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].RecordedAt.Before(ordered[j].RecordedAt) })
+
+	best := make(map[string]Report, len(ordered))
+	for _, r := range ordered {
 		key := r.Phase + "/" + r.Workload
-		if cur, ok := best[key]; !ok || r.RecordedAt.After(cur.RecordedAt) {
+		cur, ok := best[key]
+		if !ok {
 			best[key] = r
+			continue
 		}
+		best[key] = merge(cur, r)
 	}
 
 	out := make([]Report, 0, len(best))
@@ -274,5 +312,32 @@ func Latest(reports []Report) []Report {
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Phase < out[j].Phase })
+	return out
+}
+
+// merge folds a newer report over an older one for the same (phase, workload).
+//
+// Sections the newer report measured win outright. Sections it did not measure at all are carried
+// forward from the older one, which is what lets latency and staleness be collected by separate
+// commands without either erasing the other.
+func merge(older, newer Report) Report {
+	out := newer
+	if out.Env.Host == "" {
+		out.Env = older.Env
+	}
+	if out.Client.Read.Count == 0 {
+		out.Client = older.Client
+		out.Params = older.Params
+		out.Runs = older.Runs
+	}
+	if out.Cache.HitRate == 0 && out.Cache.MemoryBytes == 0 {
+		out.Cache = older.Cache
+	}
+	if out.Origin.QPS == 0 && out.Origin.PeakQPS == 0 {
+		out.Origin = older.Origin
+	}
+	if out.Staleness.Observations == 0 {
+		out.Staleness = older.Staleness
+	}
 	return out
 }

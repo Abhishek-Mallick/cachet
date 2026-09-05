@@ -9,7 +9,7 @@ import (
 )
 
 // readmeTableHeader identifies the benchmark table inside the README.
-const readmeTableHeader = "| Configuration | Hit rate | p99 read | Origin QPS under stampede | Staleness | Redis mem |"
+const readmeTableHeader = "| Configuration | Hit rate | p99 read | Origin QPS | Staleness | Cache mem |"
 
 // placeholder is what an unmeasured cell shows. A phase with no results keeps its placeholder
 // rather than being dropped, so the table always states the full plan and shows what is still
@@ -164,7 +164,22 @@ func renderRow(label string, r Report) string {
 	}
 
 	return fmt.Sprintf("| %s | %s | %s | %s | %s | %s |",
-		label, hitRate, p99, originQPS, placeholder, memory)
+		label, hitRate, p99, originQPS, renderStaleness(r.Staleness), memory)
+}
+
+// renderStaleness formats how long a committed write stayed invisible to other sessions.
+func renderStaleness(s StalenessMetrics) string {
+	if s.Observations == 0 {
+		return placeholder
+	}
+
+	out := formatMicros(s.Observed.P99) + " <sub>p99</sub>"
+	if s.NotConverged > 0 {
+		// Percentiles over only the writes that DID become visible would be a flattering lie: the
+		// ones that never converged are the worst cases, so dropping them improves the number.
+		out += fmt.Sprintf(" <sub>(%d never converged)</sub>", s.NotConverged)
+	}
+	return out
 }
 
 // formatMicros renders a microsecond count the way a reader thinks about it.

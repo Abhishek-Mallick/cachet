@@ -145,7 +145,7 @@ func TestReadmeTableIsRegeneratedFromReports(t *testing.T) {
 
 Some prose.
 
-| Configuration | Hit rate | p99 read | Origin QPS under stampede | Staleness | Redis mem |
+| Configuration | Hit rate | p99 read | Origin QPS | Staleness | Cache mem |
 |---|---|---|---|---|---|
 | No cache | — | — | — | — | — |
 | TTL only | — | — | — | — | — |
@@ -189,7 +189,7 @@ func TestReadmeUpdateIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	readme := filepath.Join(t.TempDir(), "README.md")
-	writeReadme(t, readme, `| Configuration | Hit rate | p99 read | Origin QPS under stampede | Staleness | Redis mem |
+	writeReadme(t, readme, `| Configuration | Hit rate | p99 read | Origin QPS | Staleness | Cache mem |
 |---|---|---|---|---|---|
 | No cache | — | — | — | — | — |
 `)
@@ -264,7 +264,7 @@ func TestReadmeRecordsWhereTheNumbersCameFrom(t *testing.T) {
 	t.Parallel()
 
 	readme := filepath.Join(t.TempDir(), "README.md")
-	writeReadme(t, readme, `| Configuration | Hit rate | p99 read | Origin QPS under stampede | Staleness | Redis mem |
+	writeReadme(t, readme, `| Configuration | Hit rate | p99 read | Origin QPS | Staleness | Cache mem |
 |---|---|---|---|---|---|
 | No cache | — | — | — | — | — |
 
@@ -300,5 +300,131 @@ Trailing prose.
 	// Regenerating must replace the provenance line, not stack a second one under the table.
 	if n := strings.Count(readString(t, readme), "docker-desktop-macos"); n != 1 {
 		t.Errorf("provenance line appears %d times after two runs, want 1", n)
+	}
+}
+
+func TestReadmeShowsMeasuredStaleness(t *testing.T) {
+	t.Parallel()
+
+	readme := filepath.Join(t.TempDir(), "README.md")
+	writeReadme(t, readme, `| Configuration | Hit rate | p99 read | Origin QPS | Staleness | Cache mem |
+|---|---|---|---|---|---|
+| No cache | — | — | — | — | — |
+| TTL only | — | — | — | — | — |
+`)
+
+	reports := []harness.Report{{
+		SchemaVersion: 1, Phase: "1-ttl", Workload: "W2", Runs: 3,
+		Env:    harness.Env{Host: "docker-desktop-macos"},
+		Client: harness.Aggregate([]harness.RunMetrics{runWithP99(900), runWithP99(950), runWithP99(920)}),
+		Cache:  harness.CacheMetrics{HitRate: 0.87},
+		Staleness: harness.StalenessMetrics{
+			Observed:     harness.Latencies{P50: 15_000_000, P99: 30_000_000, Max: 31_000_000, Count: 200},
+			Observations: 200,
+		},
+	}}
+
+	if err := harness.UpdateReadme(readme, reports); err != nil {
+		t.Fatalf("UpdateReadme: %v", err)
+	}
+	out := readString(t, readme)
+
+	// Phase 1's staleness is the number that motivates Phase 2. Leaving it as a placeholder while
+	// the latency improves would advertise the win and hide the cost.
+	if !strings.Contains(out, "30.00s") {
+		t.Errorf("the TTL row does not show the measured p99 staleness:\n%s", out)
+	}
+	if !strings.Contains(out, "87.0%") {
+		t.Errorf("the TTL row does not show the hit rate:\n%s", out)
+	}
+}
+
+func TestReadmeMarksStalenessThatNeverConverged(t *testing.T) {
+	t.Parallel()
+
+	readme := filepath.Join(t.TempDir(), "README.md")
+	writeReadme(t, readme, `| Configuration | Hit rate | p99 read | Origin QPS | Staleness | Cache mem |
+|---|---|---|---|---|---|
+| TTL only | — | — | — | — | — |
+`)
+
+	reports := []harness.Report{{
+		SchemaVersion: 1, Phase: "1-ttl", Workload: "W2", Runs: 3,
+		Env:    harness.Env{Host: "docker-desktop-macos"},
+		Client: harness.Aggregate([]harness.RunMetrics{runWithP99(900)}),
+		Staleness: harness.StalenessMetrics{
+			Observed:     harness.Latencies{P99: 30_000_000, Count: 180},
+			Observations: 200,
+			NotConverged: 20,
+		},
+	}}
+
+	if err := harness.UpdateReadme(readme, reports); err != nil {
+		t.Fatalf("UpdateReadme: %v", err)
+	}
+
+	// A percentile computed only over the writes that DID become visible would be a flattering lie:
+	// the ones that never converged are the worst cases, and dropping them improves the number.
+	if out := readString(t, readme); !strings.Contains(out, "20 never converged") {
+		t.Errorf("non-convergence was not disclosed:\n%s", out)
+	}
+}
+
+func TestLatestMergesMeasurementsFromSeparateRuns(t *testing.T) {
+	t.Parallel()
+
+	// Latency and staleness are produced by different commands and land in different files. Keeping
+	// only the newest file per (phase, workload) would let a staleness probe silently erase the
+	// latency numbers for the same phase — the row would lose the column that was measured first.
+	latency := harness.Report{
+		SchemaVersion: 1, Phase: "1-ttl", Workload: "W2", Runs: 3,
+		RecordedAt: time.Now().Add(-time.Minute),
+		Client:     harness.Aggregate([]harness.RunMetrics{runWithP99(1200), runWithP99(1300), runWithP99(1250)}),
+		Cache:      harness.CacheMetrics{HitRate: 0.81},
+		Origin:     harness.OriginMetrics{QPS: 139},
+	}
+	staleness := harness.Report{
+		SchemaVersion: 1, Phase: "1-ttl", Workload: "W2", Runs: 1,
+		RecordedAt: time.Now(),
+		Staleness: harness.StalenessMetrics{
+			Observed: harness.Latencies{P99: 10_100_000, Count: 12}, Observations: 12,
+		},
+	}
+
+	latest := harness.Latest([]harness.Report{latency, staleness})
+	if len(latest) != 1 {
+		t.Fatalf("kept %d reports, want 1", len(latest))
+	}
+
+	got := latest[0]
+	if got.Staleness.Observations != 12 {
+		t.Error("the newer staleness measurement was lost")
+	}
+	if got.Client.Read.P99 != 1250 {
+		t.Errorf("client p99 = %d, want 1250 — the older latency measurement was erased", got.Client.Read.P99)
+	}
+	if got.Cache.HitRate != 0.81 || got.Origin.QPS != 139 {
+		t.Errorf("cache/origin measurements were lost: %v / %v", got.Cache.HitRate, got.Origin.QPS)
+	}
+}
+
+func TestLatestPrefersTheNewerOfTwoOverlappingMeasurements(t *testing.T) {
+	t.Parallel()
+
+	older := harness.Report{
+		SchemaVersion: 1, Phase: "1-ttl", Workload: "W2", Runs: 3,
+		RecordedAt: time.Now().Add(-time.Hour),
+		Client:     harness.Aggregate([]harness.RunMetrics{runWithP99(9999)}),
+	}
+	newer := harness.Report{
+		SchemaVersion: 1, Phase: "1-ttl", Workload: "W2", Runs: 3,
+		RecordedAt: time.Now(),
+		Client:     harness.Aggregate([]harness.RunMetrics{runWithP99(111)}),
+	}
+
+	// Merging must never resurrect a superseded number. Re-running a phase replaces what it
+	// re-measured; it only fills in what it did not measure at all.
+	if got := harness.Latest([]harness.Report{older, newer})[0].Client.Read.P99; got != 111 {
+		t.Errorf("client p99 = %d, want the newer 111", got)
 	}
 }

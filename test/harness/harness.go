@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
+	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
@@ -33,11 +34,15 @@ var DefaultShards = []config.Shard{
 	{ID: "shard2", DSN: "root:cachet@tcp(127.0.0.1:3318)/cachet?parseTime=true&interpolateParams=true"},
 }
 
+// DefaultCacheAddr matches test/env/compose.yml.
+const DefaultCacheAddr = "127.0.0.1:6379"
+
 // Cluster is a running engine plus the shards behind it.
 type Cluster struct {
 	Addrs  []net.Addr
 	Shards map[storage.ShardID]*storage.Shard
 	Router *storage.Router
+	Cache  *cache.Client
 
 	stop func()
 }
@@ -52,6 +57,41 @@ func (c *Cluster) Stop() { c.stop() }
 // shards directly — a consistency failure you cannot explain is one you will eventually delete
 // (test/README.md).
 func Start(ctx context.Context, t *testing.T, listen ...string) *Cluster {
+	t.Helper()
+	return start(ctx, t, nil, listen...)
+}
+
+// StartCached brings up an engine backed by the test environment's cache.
+//
+// Cached and uncached clusters are started by the same code path so that a difference measured
+// between them is the cache, and not some other divergence in how the two were assembled.
+func StartCached(ctx context.Context, t *testing.T, ttl time.Duration, listen ...string) *Cluster {
+	t.Helper()
+
+	EnsureEnvironment(ctx, t)
+	c, err := cache.New(ctx, cache.Options{Addresses: []string{DefaultCacheAddr}, TTL: ttl})
+	if err != nil {
+		t.Fatalf("cache.New: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// The compose stack's cache is shared and persistent, so entries survive between test runs. A
+	// test asserting "the first read is a miss" would then pass on a clean machine and fail on the
+	// second run — the classic order-dependent flake. Each cached cluster starts from an empty
+	// cache, which is what "every suite brings its own environment" means for cache state.
+	//
+	// This is safe because tests within a package run sequentially unless they call t.Parallel(),
+	// and the e2e tests deliberately do not.
+	if err := c.Flush(ctx); err != nil {
+		t.Fatalf("flush cache: %v", err)
+	}
+
+	cluster := start(ctx, t, c, listen...)
+	cluster.Cache = c
+	return cluster
+}
+
+func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, listen ...string) *Cluster {
 	t.Helper()
 
 	EnsureEnvironment(ctx, t)
@@ -77,7 +117,9 @@ func Start(ctx context.Context, t *testing.T, listen ...string) *Cluster {
 	eng, err := engine.New(engine.Options{
 		Router:           router,
 		Shards:           shards,
+		Cache:            cacheClient,
 		MaxSessionShards: 64,
+		MaxClockSkew:     250 * time.Millisecond,
 		Version:          "test",
 	})
 	if err != nil {

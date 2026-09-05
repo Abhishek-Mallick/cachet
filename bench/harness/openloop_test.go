@@ -103,19 +103,24 @@ func TestWarmupSamplesAreDiscarded(t *testing.T) {
 	// phase boundary is deterministic. A racing timer would make this test flaky for reasons that
 	// have nothing to do with the code under test.
 	//
-	// 150ms of warmup at 200rps is ~30 requests, so indices below 25 are safely inside it. The rate
-	// is also within what 8 workers can sustain while cold (8/20ms = 400rps), because an
-	// over-saturated scenario would starve the measurement window and the test would pass vacuously.
-	const coldRequests = 25
+	// The parameters leave deliberate headroom. Cold work totals 20 x 50ms across 8 workers, about
+	// 125ms, comfortably inside the 300ms warmup — because a MEASURED request that queued behind
+	// unfinished warmup work is not a leak, it is correct open-loop accounting, and the two must
+	// not be conflated. An earlier version of this test asserted a tight p99 and failed under
+	// -race for exactly that reason.
+	const (
+		coldRequests = 20
+		coldLatency  = 50 * time.Millisecond
+	)
 
 	d := harness.Driver{
-		Rate:    200,
+		Rate:    100,
 		Workers: 8,
-		Warmup:  150 * time.Millisecond,
-		Measure: 150 * time.Millisecond,
+		Warmup:  300 * time.Millisecond,
+		Measure: 200 * time.Millisecond,
 		Op: func(_ context.Context, i uint64) error {
 			if i < coldRequests {
-				time.Sleep(20 * time.Millisecond)
+				time.Sleep(coldLatency)
 			}
 			return nil
 		},
@@ -126,17 +131,18 @@ func TestWarmupSamplesAreDiscarded(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Cold caches, empty pools and a filling MyRocks block cache are not the steady state
-	// (benchmarking doc §3.3). Warmup is a declared parameter, and its samples must not reach the
-	// recorded distribution.
-	if p99 := res.Read.Percentile(99); p99 > 10*time.Millisecond {
-		t.Errorf("p99 = %s; warmup samples leaked into the measurement window", p99)
-	}
 	if res.WarmupRequests == 0 {
 		t.Error("no warmup requests were issued, so the phase separation was not exercised")
 	}
 	if res.Read.Count() == 0 {
-		t.Fatal("no measurement samples were recorded; the assertion above proved nothing")
+		t.Fatal("no measurement samples were recorded; the assertion below would prove nothing")
+	}
+
+	// Cold caches, empty pools and a filling MyRocks block cache are not the steady state
+	// (benchmarking doc §3.3). A leaked warmup sample would carry the full 50ms cold latency, well
+	// past this threshold, while ordinary scheduler noise stays far below it.
+	if p99 := res.Read.Percentile(99); p99 >= coldLatency/2 {
+		t.Errorf("measured p99 = %s; warmup samples leaked into the measurement window", p99)
 	}
 }
 

@@ -6,6 +6,9 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
@@ -245,6 +248,8 @@ func runContractSuite(ctx context.Context, t *testing.T, c cachetv1.CacheService
 		}
 	})
 }
+
+func durationProto(d time.Duration) *durationpb.Duration { return durationpb.New(d) }
 
 func itoa(v uint64) string {
 	if v == 0 {

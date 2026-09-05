@@ -187,3 +187,52 @@ func TestDurationIsObservedForSlowHandlers(t *testing.T) {
 		t.Errorf("requests_total = %v, want 1", got)
 	}
 }
+
+func TestCacheOutcomesAreCountedSeparately(t *testing.T) {
+	t.Parallel()
+
+	m, _ := newMetrics(t)
+
+	m.RecordCacheOp("get", "hit")
+	m.RecordCacheOp("get", "hit")
+	m.RecordCacheOp("get", "miss")
+	m.RecordCacheOp("get", "stale")
+
+	// "stale" is counted apart from "miss" deliberately. A plain miss means the cache did not have
+	// the row; a stale miss means it did, but the entry was not fresh enough for the level asked
+	// for. The ratio between them says whether a level's cost comes from cache capacity or from the
+	// guarantee itself — one is fixed by more memory, the other is not.
+	for _, tc := range []struct {
+		result string
+		want   float64
+	}{{"hit", 2}, {"miss", 1}, {"stale", 1}} {
+		if got := testutil.ToFloat64(m.CacheOps().WithLabelValues("get", tc.result)); got != tc.want {
+			t.Errorf("cache_operations_total{op=get,result=%s} = %v, want %v", tc.result, got, tc.want)
+		}
+	}
+}
+
+func TestOriginReadsAreCounted(t *testing.T) {
+	t.Parallel()
+
+	m, _ := newMetrics(t)
+	for i := 0; i < 5; i++ {
+		m.RecordOriginRead()
+	}
+
+	// Origin QPS is the real cost metric for the caching claim: client latency may barely move
+	// while database load collapses (benchmarking doc §3.6).
+	if got := testutil.ToFloat64(m.OriginReads()); got != 5 {
+		t.Errorf("origin_reads_total = %v, want 5", got)
+	}
+}
+
+func TestNilMetricsAreSafeToCall(t *testing.T) {
+	t.Parallel()
+
+	// The engine takes metrics as an option so tests need not wire a registry. A nil receiver that
+	// panics would make every such test a landmine.
+	var m *obs.Metrics
+	m.RecordCacheOp("get", "hit")
+	m.RecordOriginRead()
+}

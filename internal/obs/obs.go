@@ -32,6 +32,8 @@ type Metrics struct {
 	duration  *prometheus.HistogramVec
 	inFlight  *prometheus.GaugeVec
 	guarantee *prometheus.GaugeVec
+	cacheOps  *prometheus.CounterVec
+	origin    prometheus.Counter
 }
 
 // NewMetrics registers Cachet's collectors on reg.
@@ -66,6 +68,18 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Help:      "Requests currently being served, by method.",
 		}, []string{"method"}),
 
+		cacheOps: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "cache_operations_total",
+			Help:      "Cache operations by op and result. Results: hit, miss, stale, error, ok.",
+		}, []string{"op", "result"}),
+
+		origin: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "origin_reads_total",
+			Help:      "Reads that reached the database. This is the real cost metric for the caching claim.",
+		}),
+
 		guarantee: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "guarantee_setting",
@@ -73,7 +87,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		}, []string{"setting"}),
 	}
 
-	for _, c := range []prometheus.Collector{m.requests, m.duration, m.inFlight, m.guarantee} {
+	for _, c := range []prometheus.Collector{m.requests, m.duration, m.inFlight, m.guarantee, m.cacheOps, m.origin} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("obs: register collector: %w", err)
 		}
@@ -86,6 +100,39 @@ func (m *Metrics) RequestsTotal() *prometheus.CounterVec { return m.requests }
 
 // GuaranteeSetting exposes the guarantee gauge for assertions.
 func (m *Metrics) GuaranteeSetting() *prometheus.GaugeVec { return m.guarantee }
+
+// CacheOps exposes the cache counter for assertions.
+func (m *Metrics) CacheOps() *prometheus.CounterVec { return m.cacheOps }
+
+// OriginReads exposes the origin counter for assertions.
+func (m *Metrics) OriginReads() prometheus.Counter { return m.origin }
+
+// RecordCacheOp counts one cache operation.
+//
+// "stale" is a distinct result from "miss" on purpose: a miss means the cache did not hold the row,
+// while a stale result means it did but the entry was not fresh enough for the level requested. The
+// ratio between them says whether a level's cost comes from cache capacity or from the guarantee
+// itself — more memory fixes one and not the other.
+//
+// The nil receiver is a no-op so that components can take metrics as an option and tests need not
+// wire a registry to exercise them.
+func (m *Metrics) RecordCacheOp(op, result string) {
+	if m == nil {
+		return
+	}
+	m.cacheOps.WithLabelValues(op, result).Inc()
+}
+
+// RecordOriginRead counts one read that reached the database.
+//
+// This is the metric the caching claim actually rests on: client latency may barely move while
+// origin load collapses, and origin load is what costs money (benchmarking doc §3.6).
+func (m *Metrics) RecordOriginRead() {
+	if m == nil {
+		return
+	}
+	m.origin.Inc()
+}
 
 // UnaryInterceptor records RED metrics for every request.
 func (m *Metrics) UnaryInterceptor() grpc.UnaryServerInterceptor {

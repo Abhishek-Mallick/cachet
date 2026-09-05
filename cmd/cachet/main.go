@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
+	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
 	"github.com/Abhishek-Mallick/cachet/internal/obs"
@@ -89,11 +90,36 @@ func run() error {
 	}
 	defer closeShards(shards, log)
 
+	// A cache is optional. With no addresses configured the engine runs uncached, which is the
+	// Phase 0 baseline configuration and stays available as a control rather than being deleted.
+	var cacheClient engine.Cache
+	if len(cfg.Cache.Addresses) > 0 {
+		cc, err := cache.New(ctx, cache.Options{
+			Addresses: cfg.Cache.Addresses,
+			TTL:       cfg.Consistency.EntryTTL,
+		})
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := cc.Close(); err != nil {
+				log.Warn("closing cache failed", "err", err)
+			}
+		}()
+		cacheClient = cc
+		log.Info("cache connected", "addresses", cfg.Cache.Addresses, "entry_ttl", cfg.Consistency.EntryTTL)
+	} else {
+		log.Warn("no cache configured; every read will reach the database")
+	}
+
 	eng, err := engine.New(engine.Options{
 		Router:           router,
 		Shards:           shards,
+		Cache:            cacheClient,
 		MaxSessionShards: cfg.Consistency.MaxSessionShards,
+		MaxClockSkew:     cfg.Consistency.MaxClockSkew,
 		Version:          version,
+		Metrics:          metrics,
 		Logger:           log,
 	})
 	if err != nil {
