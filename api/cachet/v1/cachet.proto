@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+// Package cachet.v1 is Cachet's wire contract.
+//
+// The protocol is versioned independently of the binaries (delivery model §7): an engine and an SDK
+// WILL drift in the field, so Handshake exists from day one rather than being added after the first
+// support incident.
+//
+// A change to the meaning of any ConsistencyLevel is a MAJOR version change and lands in cachet.v2.
+// The guarantee is the contract — see CONSISTENCY.md.
+package cachet.v1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/Abhishek-Mallick/cachet/api/cachet/v1;cachetv1";
+
+// ConsistencyLevel selects a per-request guarantee. Defined normatively in CONSISTENCY.md §3.
+enum ConsistencyLevel {
+  // Unspecified is treated as SESSION, which is the documented default. A client that forgets to
+  // choose gets read-own-writes rather than silently getting the weakest option.
+  CONSISTENCY_LEVEL_UNSPECIFIED = 0;
+
+  // Bypasses the cache entirely. Money, auth, anything serializable.
+  CONSISTENCY_LEVEL_STRONG = 1;
+
+  // Read-own-writes plus monotonic reads, scoped to the session token. The default.
+  CONSISTENCY_LEVEL_SESSION = 2;
+
+  // SESSION plus a freshness floor: staleness bounded by staleness_bound, measured from COMMIT
+  // time, not read time. Requires staleness_bound to be set.
+  CONSISTENCY_LEVEL_BOUNDED = 3;
+
+  // Best effort. No read-own-writes, no monotonic reads. Exists to make the cost of the other
+  // levels visible in the benchmark table.
+  CONSISTENCY_LEVEL_EVENTUAL = 4;
+}
+
+// SessionToken carries a session's causal position.
+//
+// It is a sparse map from shard id to HLC version, NOT a scalar, because each shard runs its own
+// clock and versions from different shards are incomparable (ADR 0003). It is held by the client,
+// not the server: that is what lets the guarantee survive a reconnect or an engine failover, since
+// engines are stateless with respect to sessions (CONSISTENCY.md §4).
+message SessionToken {
+  map<string, uint64> watermarks = 1;
+}
+
+// Record is one cached row.
+message Record {
+  uint64 id = 1;
+  uint32 tenant_id = 2;
+  uint32 status = 3;
+  bytes payload = 4;
+
+  // The HLC version of the write that last modified this row. Maintained by Cachet, never by the
+  // application.
+  uint64 version = 5;
+}
+
+// ReadMeta reports what actually happened, as distinct from what was asked for.
+message ReadMeta {
+  // The level actually served. It may be weaker than the level requested — see degraded.
+  ConsistencyLevel level_served = 1;
+
+  // True when the engine could not honour the requested level and served a weaker one. Ignoring
+  // this is the caller's decision, but it must be a VISIBLE decision: a silent downgrade of a
+  // stated guarantee is precisely the failure Cachet exists to eliminate.
+  bool degraded = 2;
+  string degraded_reason = 3;
+
+  bool cache_hit = 4;
+
+  // The row's own version, and the shard-state version the served entry reflects. Both are exposed
+  // because they answer different questions, and conflating them is a correctness bug rather than
+  // an inefficiency (CONSISTENCY.md §1).
+  uint64 row_version = 5;
+  uint64 fill_version = 6;
+}
+
+// WriteMeta reports what a write actually did.
+message WriteMeta {
+  // The version the write committed at. This is what advances the caller's session watermark.
+  uint64 version = 1;
+
+  // Set when exact affected-key resolution was abandoned because the predicate matched more than
+  // max_affected_keys rows, leaving invalidation to CDC. The writer's OWN session guarantee still
+  // holds; other sessions' reads of those keys become BOUNDED(cdc_lag_bound). CONSISTENCY.md §5.
+  bool degraded = 2;
+  string degraded_reason = 3;
+  google.protobuf.Duration effective_staleness_bound = 4;
+}
+
+message GetRequest {
+  string key = 1;
+  ConsistencyLevel level = 2;
+
+  // Required when level is BOUNDED, rejected otherwise. Measured from commit time.
+  google.protobuf.Duration staleness_bound = 3;
+
+  SessionToken session = 4;
+}
+
+message GetResponse {
+  // Absence is a first-class answer, not an error: "this row does not exist" is a cacheable fact,
+  // and an insert must later invalidate that negative entry.
+  bool found = 1;
+  Record record = 2;
+  ReadMeta meta = 3;
+
+  // The caller's session token, advanced by this read. Monotonic reads come from the client
+  // carrying this forward.
+  SessionToken session = 4;
+}
+
+message BatchGetRequest {
+  repeated string keys = 1;
+  ConsistencyLevel level = 2;
+  google.protobuf.Duration staleness_bound = 3;
+  SessionToken session = 4;
+}
+
+// BatchGetResponse holds one entry per key that exists.
+//
+// There is deliberately no cross-key snapshot at any level: Cachet caches rows, not transactions,
+// and a batch is N independent reads. CONSISTENCY.md §6.
+message BatchGetResponse {
+  map<string, Record> records = 1;
+  ReadMeta meta = 2;
+  SessionToken session = 3;
+}
+
+message PutRequest {
+  string key = 1;
+  Record record = 2;
+  SessionToken session = 3;
+}
+
+message PutResponse {
+  WriteMeta meta = 1;
+  SessionToken session = 2;
+}
+
+message DeleteRequest {
+  string key = 1;
+  SessionToken session = 2;
+}
+
+message DeleteResponse {
+  // False when the row did not exist. Deleting an absent row is not an error, but the caller is
+  // told, because it determines whether a negative cache entry needed invalidating.
+  bool existed = 1;
+  WriteMeta meta = 2;
+  SessionToken session = 3;
+}
+
+message HandshakeRequest {
+  // The protocol version the client was built against, e.g. "cachet.v1".
+  string protocol_version = 1;
+  string client_version = 2;
+}
+
+message HandshakeResponse {
+  string protocol_version = 1;
+  string server_version = 2;
+
+  // True when the server can serve this client. False is not an error status: it lets the SDK log
+  // a precise, actionable message instead of failing on an unrelated field later.
+  bool compatible = 3;
+  string incompatibility_reason = 4;
+
+  // Levels this server will actually serve. A client can then fail fast at startup rather than on
+  // the first request that asks for something unsupported.
+  repeated ConsistencyLevel supported_levels = 5;
+}
+
+// CacheService is the data-plane service.
+service CacheService {
+  // Handshake negotiates protocol compatibility. Clients call it once on connect.
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc BatchGet(BatchGetRequest) returns (BatchGetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}

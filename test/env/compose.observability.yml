@@ -1,0 +1,45 @@
+# Overlay: Prometheus + Grafana, dashboards provisioned from deploy/grafana.
+#
+# `make demo` brings this up. The consistency-SLO panel is the product thesis rendered, so the
+# dashboards are versioned in deploy/grafana/ and symlinked here rather than being clicked together
+# in the UI and lost.
+
+services:
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_TAG:-v3.1.0}
+    container_name: cachet-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=6h"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_TAG:-11.5.1}
+    container_name: cachet-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../deploy/grafana:/var/lib/grafana/dashboards:ro
+    ports: ["${GRAFANA_PORT:-3000}:3000"]
+    depends_on:
+      prometheus: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped

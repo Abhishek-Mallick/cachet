@@ -1,0 +1,29 @@
+# Overlay: Toxiproxy in front of every dependency.
+#
+# The chaos suite (test/chaos/) drives this API to inject the nine faults. Note what is being
+# asserted there: not that Cachet survives a fault — surviving is table stakes — but that Sextant
+# CATCHES and EXPLAINS it. That distinction is the product (build plan §9.2).
+#
+#   docker compose -f compose.yml -f compose.chaos.yml up -d --wait
+
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:${TOXIPROXY_TAG:-2.12.0}
+    container_name: cachet-toxiproxy
+    ports:
+      - "${TOXIPROXY_API_PORT:-8474}:8474"   # control API
+      - "23306:23306"                        # → shard0
+      - "23307:23307"                        # → shard1
+      - "23308:23308"                        # → shard2
+      - "26379:26379"                        # → cache
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    depends_on:
+      shard0: { condition: service_healthy }
+      shard1: { condition: service_healthy }
+      shard2: { condition: service_healthy }
+      cache:  { condition: service_healthy }
+    restart: unless-stopped

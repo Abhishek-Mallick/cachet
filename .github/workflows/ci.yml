@@ -1,0 +1,103 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.27.1"
+
+jobs:
+  hygiene:
+    name: fmt · vet · lint · tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - name: go mod tidy is clean
+        run: make tidy
+      - uses: golangci/golangci-lint-action@v6
+        with: { version: v2.13.2, args: "--timeout=5m --build-tags=integration,e2e,chaos" }
+      # `golangci-lint fmt` has no --diff mode, so formatting is checked by running it and asserting
+      # nothing changed. Ordering matters: this must come after `run`, since fmt rewrites files.
+      - name: formatting is clean
+        run: |
+          golangci-lint fmt ./...
+          git diff --exit-code
+      - run: go vet ./...
+
+  unit:
+    name: unit · race · leak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      # -count=2 is deliberate: it catches tests that only pass because of
+      # state left behind by their first run. Build plan §7.2.
+      - run: go test -race -count=2 ./...
+
+  build-matrix:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}" }
+        run: make build
+
+  integration:
+    name: integration · testcontainers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - run: make test-integration
+
+  env-budget:
+    name: env-up under 90s
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      # The 90-second budget is the top of the adoption funnel (build plan §6.1).
+      # If it drifts, adoption drops and nobody notices. So it is a CI failure.
+      - name: make env-up
+        run: |
+          start=$(date +%s)
+          make env-up
+          elapsed=$(( $(date +%s) - start ))
+          echo "env-up took ${elapsed}s"
+          if [ "$elapsed" -gt 90 ]; then
+            echo "::error::env-up took ${elapsed}s, budget is 90s (build plan §9.2)"
+            exit 1
+          fi
+      - if: always()
+        run: make env-down
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - run: make vuln

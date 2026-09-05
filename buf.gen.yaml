@@ -1,0 +1,11 @@
+version: v2
+# Plugins are resolved through `go tool`, so their versions are pinned in go.mod alongside every
+# other dependency. A generator pinned by whatever happens to be on someone's PATH is not
+# reproducible, and `make generate` claims to be.
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: .
+    opt: module=github.com/Abhishek-Mallick/cachet
+  - local: ["go", "tool", "protoc-gen-go-grpc"]
+    out: .
+    opt: module=github.com/Abhishek-Mallick/cachet

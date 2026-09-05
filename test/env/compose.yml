@@ -1,0 +1,87 @@
+# Cachet base environment: 3 sharded MySQL/MyRocks instances + Valkey.
+#
+# Budget: `make env-up` must report healthy in under 90 seconds. That budget is enforced in CI
+# (.github/workflows/ci.yml) because it is the top of the adoption funnel — see
+# docs/cachet-build-plan.md §6.1 and §9.2.
+#
+# Overlays:
+#   compose.observability.yml  Prometheus + Grafana
+#   compose.chaos.yml          Toxiproxy in front of every dependency
+#   compose.innodb.yml         swap MyRocks for InnoDB (the §13 storage-engine study)
+
+x-shard: &shard
+  image: percona/percona-server:${PERCONA_TAG:-8.0}
+  command: ["--defaults-extra-file=/etc/my.cnf.d/cachet.cnf"]
+  environment:
+    MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-cachet}
+    MYSQL_DATABASE: ${MYSQL_DATABASE:-cachet}
+  volumes:
+    - ./mysql/my.myrocks.cnf:/etc/my.cnf.d/cachet.cnf:ro
+    - ./mysql/initdb:/docker-entrypoint-initdb.d:ro
+  healthcheck:
+    # Waits for the server to answer, not merely for the container to exist. The seed step and
+    # every test suite depend on this being honest.
+    test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-cachet}"]
+    interval: 3s
+    timeout: 5s
+    retries: 25
+    start_period: 10s
+  restart: unless-stopped
+
+services:
+  shard0:
+    <<: *shard
+    container_name: cachet-shard0
+    command:
+      - "--defaults-extra-file=/etc/my.cnf.d/cachet.cnf"
+      - "--server-id=1"
+    ports: ["${SHARD0_PORT:-3316}:3306"]
+    volumes:
+      - ./mysql/my.myrocks.cnf:/etc/my.cnf.d/cachet.cnf:ro
+      - ./mysql/initdb:/docker-entrypoint-initdb.d:ro
+      - shard0-data:/var/lib/mysql
+
+  shard1:
+    <<: *shard
+    container_name: cachet-shard1
+    command:
+      - "--defaults-extra-file=/etc/my.cnf.d/cachet.cnf"
+      - "--server-id=2"
+    ports: ["${SHARD1_PORT:-3317}:3306"]
+    volumes:
+      - ./mysql/my.myrocks.cnf:/etc/my.cnf.d/cachet.cnf:ro
+      - ./mysql/initdb:/docker-entrypoint-initdb.d:ro
+      - shard1-data:/var/lib/mysql
+
+  shard2:
+    <<: *shard
+    container_name: cachet-shard2
+    command:
+      - "--defaults-extra-file=/etc/my.cnf.d/cachet.cnf"
+      - "--server-id=3"
+    ports: ["${SHARD2_PORT:-3318}:3306"]
+    volumes:
+      - ./mysql/my.myrocks.cnf:/etc/my.cnf.d/cachet.cnf:ro
+      - ./mysql/initdb:/docker-entrypoint-initdb.d:ro
+      - shard2-data:/var/lib/mysql
+
+  # Valkey is the default per docs/adr/0002-redis-vs-valkey.md. Redis 8 is protocol- and
+  # script-compatible; swap the image to test against it.
+  cache:
+    image: valkey/valkey:${VALKEY_TAG:-8-alpine}
+    container_name: cachet-cache
+    command: ["valkey-server", "/etc/valkey/valkey.conf"]
+    volumes:
+      - ./redis/valkey.conf:/etc/valkey/valkey.conf:ro
+    ports: ["${CACHE_PORT:-6379}:6379"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  shard0-data:
+  shard1-data:
+  shard2-data:

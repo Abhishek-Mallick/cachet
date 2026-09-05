@@ -1,0 +1,72 @@
+# Cachet shard configuration — Percona Server 8.0 with MyRocks.
+#
+# Two settings here are load-bearing for correctness, not performance. They are marked REQUIRED and
+# changing them changes what Cachet can guarantee.
+
+[mysqld]
+# ── Binlog: REQUIRED ────────────────────────────────────────────────────────────
+# Flux (the CDC tailer) reads this stream. ROW format with FULL row images is required because the
+# tailer must extract the primary key AND the `version` column from every event — a minimal image
+# omits unchanged columns, which would leave invalidation guessing. Guessing is the thing this
+# project exists to remove.
+log_bin                     = /var/lib/mysql/binlog
+binlog_format               = ROW
+binlog_row_image            = FULL
+binlog_row_metadata         = FULL
+binlog_expire_logs_seconds  = 86400
+gtid_mode                   = ON
+enforce_gtid_consistency    = ON
+
+# ── Isolation: REQUIRED ─────────────────────────────────────────────────────────
+# MyRocks supports READ-COMMITTED and (with limits) REPEATABLE-READ. Cachet's conditional-write path
+# does `SELECT pk ... FOR UPDATE` to resolve affected keys exactly (CONSISTENCY.md §5); under
+# READ-COMMITTED that locks matched rows without gap-lock semantics MyRocks does not implement.
+transaction_isolation       = READ-COMMITTED
+
+# ── MyRocks ─────────────────────────────────────────────────────────────────────
+# The plugin must be loaded AT STARTUP, not by an initdb script. Setting default_storage_engine to
+# an engine the server has not loaded yet makes the server refuse to boot — the initdb scripts run
+# against an already-running server, so INSTALL PLUGIN there is too late to help. plugin_load_add
+# closes that circle. (This is what Percona's `ps-admin --enable-rocksdb` does, expressed as config
+# so the 90-second demo needs no manual step.)
+# Loading ha_rocksdb.so registers the storage engine AND all of its information_schema plugins in
+# one go; naming them individually makes the server log "Function 'rocksdb_locks' already exists"
+# for each and abort.
+plugin_load_add             = rocksdb=ha_rocksdb.so
+# NOTE: default_storage_engine is deliberately NOT set to ROCKSDB.
+#
+# The Percona entrypoint bootstraps the data directory with `mysqld --initialize`, and at that point
+# no plugin is loaded, so a ROCKSDB default makes initialization abort with
+# "Unknown/unsupported storage engine: ROCKSDB" and leaves an unusable data dir.
+#
+# Every Cachet table names its engine explicitly in the DDL instead (test/fixtures/schema/), which
+# is better anyway: the schema file says which engine it was built for, and the InnoDB comparison
+# overlay for the §13 storage-engine study is a one-word change to that DDL rather than a hidden
+# server default.
+default_tmp_storage_engine  = InnoDB
+# The `loose_` prefix makes mysqld skip a variable it does not recognise instead of aborting. It is
+# required here because the data-directory bootstrap (`mysqld --initialize`) runs before any plugin
+# is loaded, so every rocksdb_* variable is unknown at that moment and would otherwise be fatal.
+loose_rocksdb_block_cache_size = 256M
+loose_rocksdb_max_open_files   = -1
+# How long a transaction waits for a row lock before failing. Cachet's conditional-write path takes
+# row locks via SELECT ... FOR UPDATE, so this bounds how long a write can block behind another.
+loose_rocksdb_lock_wait_timeout = 5
+
+# InnoDB stays loaded (system tables need it) but is kept small so the storage-engine comparison in
+# build plan §13 is not distorted by InnoDB buffer pool memory.
+innodb_buffer_pool_size     = 128M
+
+# ── Connections and visibility ──────────────────────────────────────────────────
+max_connections             = 512
+skip_name_resolve           = ON
+performance_schema          = ON
+
+# Slow query log at 5ms: uncached point lookups against an LSM engine are the baseline this project
+# measures, so anything slower is worth seeing.
+slow_query_log              = ON
+long_query_time             = 0.005
+slow_query_log_file         = /var/lib/mysql/slow.log
+
+[client]
+default-character-set = utf8mb4

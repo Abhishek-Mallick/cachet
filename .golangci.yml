@@ -1,0 +1,72 @@
+# golangci-lint v2 configuration.
+# These rules encode docs/cachet-build-plan.md §7 "Engineering standards". A finding here is a
+# merge blocker, not a suggestion.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - contextcheck      # §7.1 rule 1  — context.Context threading
+    - copyloopvar
+    - durationcheck
+    - errorlint         # §7.1 rule 4  — errors.Is/As instead of == and type asserts
+    - forbidigo         # §7.1 rules 5, 9 — no panic in library code, no fmt.Println
+    - godot
+    - godox             # §7.1 rule 14 — no TODO/FIXME on main
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - revive            # §7.1 rule 10 — exported symbols are documented
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - wastedassign
+    - whitespace
+
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: '^fmt\.Print.*$'
+          msg: "use log/slog for structured logging (build plan §7.1 rule 9)"
+        - pattern: '^log\.(Print|Fatal|Panic).*$'
+          msg: "use log/slog, not the legacy log package (build plan §7.1 rule 9)"
+      analyze-types: true
+    godox:
+      keywords: [TODO, FIXME, XXX, HACK]
+    revive:
+      rules:
+        - name: exported
+        - name: context-as-argument
+        - name: error-strings
+        - name: error-return
+        - name: indent-error-flow
+        - name: package-comments
+    gosec:
+      excludes:
+        - G404   # math/rand is deliberate in seed/bench generators; determinism beats entropy
+
+  exclusions:
+    rules:
+      # Test code may print, may use TODO markers while red, and need not document every helper.
+      - path: (_test\.go|^test/|^bench/)
+        linters: [forbidigo, godox, revive, gosec, errcheck]
+      # cmd/ mains legitimately print usage to stdout.
+      - path: ^cmd/
+        linters: [forbidigo]
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/Abhishek-Mallick/cachet

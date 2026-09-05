@@ -1,0 +1,36 @@
+# Overlay: run the shards on InnoDB instead of MyRocks.
+#
+# This exists so the storage-engine study in docs/cachet-build-plan.md §13 is a one-flag change
+# rather than a separate environment. The claim being tested is that a cache is worth MORE in front
+# of an LSM engine than a B-tree, because LSM reads are slower and more variable. A comparison run
+# on two hand-built environments would not be believable; this one runs the identical stack.
+#
+#   docker compose -f compose.yml -f compose.innodb.yml up -d --wait
+
+services:
+  shard0: &innodb
+    command:
+      - "--defaults-extra-file=/etc/my.cnf.d/cachet.cnf"
+      - "--server-id=1"
+      - "--default-storage-engine=INNODB"
+      - "--transaction-isolation=REPEATABLE-READ"
+      - "--innodb-buffer-pool-size=256M"
+    volumes:
+      - ./mysql/my.myrocks.cnf:/etc/my.cnf.d/cachet.cnf:ro
+      - ./mysql/initdb-innodb:/docker-entrypoint-initdb.d:ro
+  shard1:
+    <<: *innodb
+    command:
+      - "--defaults-extra-file=/etc/my.cnf.d/cachet.cnf"
+      - "--server-id=2"
+      - "--default-storage-engine=INNODB"
+      - "--transaction-isolation=REPEATABLE-READ"
+      - "--innodb-buffer-pool-size=256M"
+  shard2:
+    <<: *innodb
+    command:
+      - "--defaults-extra-file=/etc/my.cnf.d/cachet.cnf"
+      - "--server-id=3"
+      - "--default-storage-engine=INNODB"
+      - "--transaction-isolation=REPEATABLE-READ"
+      - "--innodb-buffer-pool-size=256M"

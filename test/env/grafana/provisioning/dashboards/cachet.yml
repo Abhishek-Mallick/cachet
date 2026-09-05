@@ -1,0 +1,14 @@
+apiVersion: 1
+providers:
+  - name: cachet
+    orgId: 1
+    folder: Cachet
+    type: file
+    disableDeletion: false
+    # Dashboards are versioned in deploy/grafana/ and mounted read-only. Editing them in the UI is
+    # deliberately not the workflow — a dashboard that only exists in someone's browser is not an
+    # artifact (build plan §5.1).
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,27 @@
+# Scrape interval is 5s rather than the usual 15s: the consistency SLO is meant to be watched live
+# during a fault injection, and a 15s interval makes a 20s fault look like two data points.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    env: cachet-local
+
+scrape_configs:
+  - job_name: cachet-engine
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels: { component: engine }
+
+  - job_name: cachet-flux
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+        labels: { component: flux }
+
+  - job_name: cachet-sextant
+    static_configs:
+      - targets: ["host.docker.internal:9102"]
+        labels: { component: sextant }
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
