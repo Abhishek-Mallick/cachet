@@ -1,5 +1,10 @@
-# Research & internal planning docs — kept local, not part of the public product
-docs/
+# Research & internal planning docs — kept local, not part of the public product.
+# Two exceptions are published, because a reader cannot check our claims without them:
+# the ADRs (why each decision was made) and the benchmarking methodology (how every
+# published number is produced).
+docs/*
+!docs/adr/
+!docs/cachet-benchmarking.md
 
 # Build output
 /bin/
