@@ -2,11 +2,32 @@ package cache
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+)
+
+// The scripts are embedded rather than inlined as Go string literals so they can be linted, diffed
+// and reviewed as Lua. They are the only place the compare-and-set invariant is actually enforced,
+// which makes them the most important few lines in the project.
+var (
+	//go:embed lua/fill_cas.lua
+	fillCASSource string
+	//go:embed lua/tombstone_cas.lua
+	tombstoneCASSource string
+	//go:embed lua/read.lua
+	readSource string
+)
+
+// go-redis's Script wrapper tries EVALSHA first and falls back to EVAL on a NOSCRIPT reply, so a
+// cache server that restarts and loses its script cache recovers without a round trip per call.
+var (
+	fillCAS      = redis.NewScript(fillCASSource)
+	tombstoneCAS = redis.NewScript(tombstoneCASSource)
+	readScript   = redis.NewScript(readSource)
 )
 
 // Options configures a Client.
@@ -65,19 +86,28 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 	return &Client{rdb: rdb, ttl: opts.TTL}, nil
 }
 
-// Get reads one entry. A miss is reported as hit=false with no error, because a miss is the normal
-// path rather than a failure — returning an error would make every cold read look like a fault and
-// drown the ones that matter.
+// Get reads one entry.
+//
+// A miss is reported as hit=false with no error, because a miss is the normal path rather than a
+// failure — returning an error would make every cold read look like a fault and drown the ones that
+// matter. A tombstoned entry reads as a miss: the marker is invisible to readers and exists only to
+// make a late fill lose its compare-and-set.
 func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
-	raw, err := c.rdb.Get(ctx, key).Bytes()
+	res, err := readScript.Run(ctx, c.rdb, []string{key}).Slice()
 	switch {
 	case errors.Is(err, redis.Nil):
 		return Entry{}, false, nil
 	case err != nil:
 		return Entry{}, false, fmt.Errorf("cache: get %s: %w", key, err)
 	}
+	if len(res) == 0 {
+		return Entry{}, false, nil
+	}
+	if len(res) != 4 {
+		return Entry{}, false, fmt.Errorf("cache: get %s: %w: %d fields", key, ErrCorruptEntry, len(res))
+	}
 
-	entry, err := Decode(raw)
+	entry, err := entryFromLua(res)
 	if err != nil {
 		// Corruption is surfaced rather than folded into a miss: a systematic encoding bug would
 		// otherwise present itself as a mysterious drop in hit rate that nobody could explain.
@@ -86,24 +116,75 @@ func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
 	return entry, true, nil
 }
 
-// Set writes one entry with the configured TTL.
-func (c *Client) Set(ctx context.Context, key string, e Entry) error {
-	if err := c.rdb.Set(ctx, key, e.Encode(), c.ttl).Err(); err != nil {
-		return fmt.Errorf("cache: set %s: %w", key, err)
+// Fill writes an entry if it wins the compare-and-set, reporting whether it was applied.
+//
+// The boolean is not incidental. The ratio of rejected to applied fills is how a racing read path
+// becomes visible: a healthy system rejects a few, and a sudden rise means reads are consistently
+// losing to writes on the same keys.
+func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
+	negative := "0"
+	if e.Negative {
+		negative = "1"
 	}
-	return nil
+
+	applied, err := fillCAS.Run(ctx, c.rdb, []string{key},
+		encodeVersion(e.RowVersion),
+		encodeVersion(e.FillVersion),
+		e.Payload,
+		negative,
+		c.ttl.Milliseconds(),
+	).Int64()
+	if err != nil {
+		return false, fmt.Errorf("cache: fill %s: %w", key, err)
+	}
+	return applied == 1, nil
 }
 
-// Delete removes one entry.
+// Tombstone marks an entry invalidated at the given version, reporting whether it was applied.
 //
-// Phase 1 has no invalidation, so this exists for operator use and for tests. Phase 2 replaces it
-// on the write path with a versioned tombstone, because a plain delete loses the delete-versus-fill
-// race that the compare-and-set invariant is designed to close (CONSISTENCY.md §2).
-func (c *Client) Delete(ctx context.Context, key string) error {
-	if err := c.rdb.Del(ctx, key).Err(); err != nil {
-		return fmt.Errorf("cache: delete %s: %w", key, err)
+// This replaces deletion on the write path. A plain delete loses the delete-versus-fill race: a
+// read that started before the write can land afterwards and refill the old value, with nothing
+// left to say it should not. The marker survives to reject exactly that fill.
+func (c *Client) Tombstone(ctx context.Context, key string, version uint64) (bool, error) {
+	applied, err := tombstoneCAS.Run(ctx, c.rdb, []string{key},
+		encodeVersion(version),
+		c.ttl.Milliseconds(),
+	).Int64()
+	if err != nil {
+		return false, fmt.Errorf("cache: tombstone %s: %w", key, err)
 	}
-	return nil
+	return applied == 1, nil
+}
+
+// entryFromLua decodes the four-element reply from read.lua.
+func entryFromLua(res []any) (Entry, error) {
+	rvRaw, ok := res[0].(string)
+	if !ok {
+		return Entry{}, fmt.Errorf("%w: row version is %T", ErrCorruptEntry, res[0])
+	}
+	rv, err := decodeVersion(rvRaw)
+	if err != nil {
+		return Entry{}, err
+	}
+
+	var fv uint64
+	if fvRaw, ok := res[1].(string); ok {
+		if fv, err = decodeVersion(fvRaw); err != nil {
+			return Entry{}, err
+		}
+	}
+
+	var payload []byte
+	if p, ok := res[2].(string); ok {
+		payload = []byte(p)
+	}
+
+	negative := false
+	if n, ok := res[3].(string); ok {
+		negative = n == "1"
+	}
+
+	return Entry{RowVersion: rv, FillVersion: fv, Payload: payload, Negative: negative}, nil
 }
 
 // Flush removes every entry.

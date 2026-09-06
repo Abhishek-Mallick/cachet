@@ -26,12 +26,18 @@ const ProtocolVersion = "cachet.v1"
 
 // Cache is the subset of the cache client the engine needs.
 //
-// It is declared here, by the consumer, and has three methods rather than the client's full surface
-// (CONTRIBUTING.md rule 10). That also makes the engine testable against a stub without pulling a
-// cache server into a unit test.
+// It is declared here, by the consumer, and names three operations rather than the client's full
+// surface (CONTRIBUTING.md rule 10). That also makes the engine testable against a stub without
+// pulling a cache server into a unit test.
+//
+// Fill and Tombstone both report whether they won their compare-and-set. The engine records the
+// answer rather than discarding it: a rising rate of rejected fills means reads are consistently
+// losing to writes on the same keys, which is a real condition with a real cause, and it is
+// invisible if the boolean is dropped.
 type Cache interface {
 	Get(ctx context.Context, key string) (cache.Entry, bool, error)
-	Set(ctx context.Context, key string, e cache.Entry) error
+	Fill(ctx context.Context, key string, e cache.Entry) (bool, error)
+	Tombstone(ctx context.Context, key string, version uint64) (bool, error)
 }
 
 // Options configures an Engine.
@@ -51,6 +57,10 @@ type Options struct {
 	// MaxClockSkew bounds the disagreement between engine and shard clocks. It shortens the
 	// BOUNDED(t) window so the engine stays conservative about its own clock.
 	MaxClockSkew time.Duration
+
+	// SynchronousInvalidation makes writes tombstone the cache after commit and before the ack.
+	// With it off, invalidation falls entirely to the CDC tailer — see config.Consistency.
+	SynchronousInvalidation bool
 
 	// Now supplies the current time. Injectable so the freshness rules can be tested against a
 	// fixed instant rather than against the machine's clock.
@@ -79,6 +89,7 @@ type Engine struct {
 	cache            Cache
 	maxSessionShards int
 	maxClockSkew     time.Duration
+	syncInvalidation bool
 	now              func() time.Time
 	version          string
 	log              *slog.Logger
@@ -125,6 +136,7 @@ func New(opts Options) (*Engine, error) {
 		cache:            opts.Cache,
 		maxSessionShards: maxShards,
 		maxClockSkew:     opts.MaxClockSkew,
+		syncInvalidation: opts.SynchronousInvalidation,
 		now:              nowFn,
 		version:          opts.Version,
 		log:              log,
@@ -180,8 +192,10 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 
 	if entry, served := e.fromCache(ctx, reqmt, key.String(), id, token); served {
 		token.Advance(string(id), entry.FillVersion)
+		// A negative entry is a hit that reports absence. Serving it as found=false is what makes
+		// "this row does not exist" a cacheable answer rather than a guaranteed database query.
 		return &cachetv1.GetResponse{
-			Found:   true,
+			Found:   !entry.Negative,
 			Record:  entryToProto(key.ID, entry),
 			Meta:    cacheHitMeta(reqmt.Level, entry),
 			Session: token.Proto(),
@@ -195,6 +209,7 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 		// Absence is an answer, not an error: "this row does not exist" is a cacheable fact, and an
 		// insert must later invalidate that negative entry.
 		token.Advance(string(id), uint64(fill))
+		e.fillNegative(ctx, key.String(), fill)
 		return &cachetv1.GetResponse{
 			Found:   false,
 			Meta:    readMeta(reqmt.Level, 0, fill),
@@ -280,12 +295,68 @@ func (e *Engine) fill(ctx context.Context, key string, rec storage.Record, fillV
 		FillVersion: uint64(fillVersion),
 		Payload:     rec.Payload,
 	}
-	if err := e.cache.Set(ctx, key, entry); err != nil {
-		e.metrics.RecordCacheOp("set", "error")
-		e.log.WarnContext(ctx, "cache fill failed", "key", key, "err", err)
+	e.applyFill(ctx, key, entry)
+}
+
+// fillNegative caches the fact that a row does not exist.
+//
+// Absence is a cacheable fact, and caching it is what stops a workload probing for missing keys from
+// bypassing the cache entirely. It is only safe because an insert invalidates the negative entry
+// through the same compare-and-set as any other write, which is what gives read-own-inserts.
+func (e *Engine) fillNegative(ctx context.Context, key string, fillVersion storage.Version) {
+	if e.cache == nil {
 		return
 	}
-	e.metrics.RecordCacheOp("set", "ok")
+	e.applyFill(ctx, key, cache.Entry{
+		// A negative entry has no row version of its own — no row was read. The fill version is
+		// what dates it, and it is the fill version every freshness rule consults anyway.
+		FillVersion: uint64(fillVersion),
+		Negative:    true,
+	})
+}
+
+func (e *Engine) applyFill(ctx context.Context, key string, entry cache.Entry) {
+	applied, err := e.cache.Fill(ctx, key, entry)
+	switch {
+	case err != nil:
+		// The caller already holds the correct answer from the database. Failing their request
+		// because a cache write failed would turn a degradation into an outage.
+		e.metrics.RecordCacheOp("fill", "error")
+		e.log.WarnContext(ctx, "cache fill failed", "key", key, "err", err)
+	case applied:
+		e.metrics.RecordCacheOp("fill", "applied")
+	default:
+		// Losing the compare-and-set is correct behaviour, not a failure: something newer is
+		// already there. It is counted because a sustained rise means reads are consistently racing
+		// writes on the same keys.
+		e.metrics.RecordCacheOp("fill", "rejected")
+	}
+}
+
+// invalidate tombstones a key at the version of the write that changed it.
+//
+// It runs AFTER the database commit and BEFORE the client's ack. That ordering is the whole
+// mechanism behind read-own-writes for other processes: by the time the caller holds the ack, the
+// stale entry is already invalidated at that version (CONSISTENCY.md §3.2).
+func (e *Engine) invalidate(ctx context.Context, key string, version storage.Version) {
+	if e.cache == nil || !e.syncInvalidation {
+		return
+	}
+	applied, err := e.cache.Tombstone(ctx, key, uint64(version))
+	switch {
+	case err != nil:
+		// The write is already committed and durable; the row is correct in the database. What is
+		// lost is the synchronous invalidation, so the key falls back to CDC — bounded by the
+		// tailer's lag rather than immediate. That is a degradation to report, not a reason to fail
+		// a committed write.
+		e.metrics.RecordCacheOp("tombstone", "error")
+		e.log.WarnContext(ctx, "invalidation failed; falling back to CDC for this key",
+			"key", key, "version", uint64(version), "err", err)
+	case applied:
+		e.metrics.RecordCacheOp("tombstone", "applied")
+	default:
+		e.metrics.RecordCacheOp("tombstone", "rejected")
+	}
 }
 
 // BatchGet reads several rows, one query per shard rather than one per key.
@@ -335,8 +406,14 @@ func (e *Engine) BatchGet(ctx context.Context, req *cachetv1.BatchGetRequest) (*
 		if fill > newest {
 			newest = fill
 		}
-		for id, rec := range rows {
-			out[Key{Table: entitiesTable, ID: id}.String()] = recordToProto(rec)
+		for _, k := range shardKeys {
+			rec, found := rows[parsed[k].ID]
+			if !found {
+				e.fillNegative(ctx, k, fill)
+				continue
+			}
+			out[k] = recordToProto(rec)
+			e.fill(ctx, k, rec, fill)
 		}
 	}
 
@@ -376,6 +453,11 @@ func (e *Engine) Put(ctx context.Context, req *cachetv1.PutRequest) (*cachetv1.P
 		return nil, e.rpcError(ctx, "put", err)
 	}
 
+	// After the commit, before the ack. By the time the caller holds this response, the stale entry
+	// is already tombstoned at this version — which is what lets a DIFFERENT process, handed this
+	// session token, read the write.
+	e.invalidate(ctx, key.String(), version)
+
 	token := consistency.TokenFromProto(req.GetSession(), e.maxSessionShards)
 	token.Advance(string(id), uint64(version))
 
@@ -410,6 +492,10 @@ func (e *Engine) Delete(ctx context.Context, req *cachetv1.DeleteRequest) (*cach
 	case err != nil:
 		return nil, e.rpcError(ctx, "delete", err)
 	}
+
+	// A delete invalidates exactly like an update: the tombstone carries the delete's version, so a
+	// read that started earlier cannot refill the row it removed.
+	e.invalidate(ctx, key.String(), version)
 
 	token.Advance(string(id), uint64(version))
 	return &cachetv1.DeleteResponse{

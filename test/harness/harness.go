@@ -58,18 +58,34 @@ func (c *Cluster) Stop() { c.stop() }
 // (test/README.md).
 func Start(ctx context.Context, t *testing.T, listen ...string) *Cluster {
 	t.Helper()
-	return start(ctx, t, nil, listen...)
+	return start(ctx, t, nil, false, listen...)
 }
 
-// StartCached brings up an engine backed by the test environment's cache.
+// CacheOptions configures a cached cluster.
+type CacheOptions struct {
+	TTL time.Duration
+
+	// SynchronousInvalidation mirrors the engine setting of the same name. Turning it off lets a
+	// test prove that a guarantee holds on the session watermark ALONE, with no invalidation
+	// helping — which is the only way to know which mechanism is actually carrying it.
+	SynchronousInvalidation bool
+}
+
+// StartCached brings up an engine backed by the test environment's cache, with invalidation on.
+func StartCached(ctx context.Context, t *testing.T, ttl time.Duration, listen ...string) *Cluster {
+	t.Helper()
+	return StartCachedWith(ctx, t, CacheOptions{TTL: ttl, SynchronousInvalidation: true}, listen...)
+}
+
+// StartCachedWith brings up a cached engine with explicit options.
 //
 // Cached and uncached clusters are started by the same code path so that a difference measured
 // between them is the cache, and not some other divergence in how the two were assembled.
-func StartCached(ctx context.Context, t *testing.T, ttl time.Duration, listen ...string) *Cluster {
+func StartCachedWith(ctx context.Context, t *testing.T, opts CacheOptions, listen ...string) *Cluster {
 	t.Helper()
 
 	EnsureEnvironment(ctx, t)
-	c, err := cache.New(ctx, cache.Options{Addresses: []string{DefaultCacheAddr}, TTL: ttl})
+	c, err := cache.New(ctx, cache.Options{Addresses: []string{DefaultCacheAddr}, TTL: opts.TTL})
 	if err != nil {
 		t.Fatalf("cache.New: %v", err)
 	}
@@ -86,12 +102,12 @@ func StartCached(ctx context.Context, t *testing.T, ttl time.Duration, listen ..
 		t.Fatalf("flush cache: %v", err)
 	}
 
-	cluster := start(ctx, t, c, listen...)
+	cluster := start(ctx, t, c, opts.SynchronousInvalidation, listen...)
 	cluster.Cache = c
 	return cluster
 }
 
-func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, listen ...string) *Cluster {
+func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, syncInvalidation bool, listen ...string) *Cluster {
 	t.Helper()
 
 	EnsureEnvironment(ctx, t)
@@ -115,12 +131,13 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, listen .
 	}
 
 	eng, err := engine.New(engine.Options{
-		Router:           router,
-		Shards:           shards,
-		Cache:            cacheClient,
-		MaxSessionShards: 64,
-		MaxClockSkew:     250 * time.Millisecond,
-		Version:          "test",
+		Router:                  router,
+		Shards:                  shards,
+		Cache:                   cacheClient,
+		MaxSessionShards:        64,
+		MaxClockSkew:            250 * time.Millisecond,
+		SynchronousInvalidation: syncInvalidation,
+		Version:                 "test",
 	})
 	if err != nil {
 		t.Fatalf("engine: %v", err)

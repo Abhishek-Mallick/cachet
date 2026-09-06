@@ -166,6 +166,12 @@ func (m *Metrics) PublishGuarantees(c config.Consistency) {
 			m.guarantee.WithLabelValues(name).Set(typed.Seconds())
 		case int:
 			m.guarantee.WithLabelValues(name).Set(float64(typed))
+		case bool:
+			var v float64
+			if typed {
+				v = 1
+			}
+			m.guarantee.WithLabelValues(name).Set(v)
 		default:
 			// Every guarantee setting must be exportable. Silently skipping an unknown type would
 			// let a new setting be added and never appear, which is the failure this gauge exists

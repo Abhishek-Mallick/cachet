@@ -106,8 +106,8 @@ func TestSetThenGetReturnsTheEntry(t *testing.T) {
 	c := newClient(ctx, t)
 
 	want := cache.Entry{RowVersion: 42, FillVersion: 99, Payload: []byte("payload")}
-	if err := c.Set(ctx, "entities:1", want); err != nil {
-		t.Fatalf("Set: %v", err)
+	if _, err := c.Fill(ctx, "entities:1", want); err != nil {
+		t.Fatalf("Fill: %v", err)
 	}
 
 	got, hit, err := c.Get(ctx, "entities:1")
@@ -148,8 +148,8 @@ func TestEntriesExpire(t *testing.T) {
 	}
 	defer func() { _ = short.Close() }()
 
-	if err := short.Set(ctx, "entities:ttl", cache.Entry{RowVersion: 1, Payload: []byte("x")}); err != nil {
-		t.Fatalf("Set: %v", err)
+	if _, err := short.Fill(ctx, "entities:ttl", cache.Entry{RowVersion: 1, Payload: []byte("x")}); err != nil {
+		t.Fatalf("Fill: %v", err)
 	}
 
 	// In Phase 1 the TTL is the ONLY thing bounding staleness, so it has to actually work. From
@@ -172,7 +172,7 @@ func TestCorruptEntryIsReportedNotServed(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	if err := c.SetRawForTest(ctx, "entities:corrupt", []byte("nonsense")); err != nil {
+	if err := c.SetRawForTest(ctx, "entities:corrupt", "not-a-version"); err != nil {
 		t.Fatalf("SetRawForTest: %v", err)
 	}
 
@@ -184,19 +184,19 @@ func TestCorruptEntryIsReportedNotServed(t *testing.T) {
 	}
 }
 
-func TestDeleteRemovesTheEntry(t *testing.T) {
+func TestTombstoneRemovesTheEntryFromReaders(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	if err := c.Set(ctx, "entities:del", cache.Entry{RowVersion: 1, Payload: []byte("x")}); err != nil {
-		t.Fatalf("Set: %v", err)
+	if _, err := c.Fill(ctx, "entities:del", cache.Entry{RowVersion: 1, Payload: []byte("x")}); err != nil {
+		t.Fatalf("Fill: %v", err)
 	}
-	if err := c.Delete(ctx, "entities:del"); err != nil {
-		t.Fatalf("Delete: %v", err)
+	if _, err := c.Tombstone(ctx, "entities:del", 2); err != nil {
+		t.Fatalf("Tombstone: %v", err)
 	}
 
 	if _, hit, err := c.Get(ctx, "entities:del"); err != nil || hit {
-		t.Errorf("after Delete: hit=%v err=%v, want a clean miss", hit, err)
+		t.Errorf("after Tombstone: hit=%v err=%v, want a clean miss", hit, err)
 	}
 }
 
@@ -229,9 +229,9 @@ func TestConcurrentSetsAndGetsAreSafe(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			key := fmt.Sprintf("entities:conc-%d", g)
-			for i := 0; i < 100; i++ {
-				if err := c.Set(ctx, key, cache.Entry{RowVersion: uint64(i), Payload: []byte("x")}); err != nil {
-					t.Errorf("Set: %v", err)
+			for i := 1; i <= 100; i++ {
+				if _, err := c.Fill(ctx, key, cache.Entry{RowVersion: uint64(i), FillVersion: uint64(i), Payload: []byte("x")}); err != nil {
+					t.Errorf("Fill: %v", err)
 					return
 				}
 				if _, _, err := c.Get(ctx, key); err != nil {

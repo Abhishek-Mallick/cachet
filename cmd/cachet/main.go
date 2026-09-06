@@ -113,14 +113,15 @@ func run() error {
 	}
 
 	eng, err := engine.New(engine.Options{
-		Router:           router,
-		Shards:           shards,
-		Cache:            cacheClient,
-		MaxSessionShards: cfg.Consistency.MaxSessionShards,
-		MaxClockSkew:     cfg.Consistency.MaxClockSkew,
-		Version:          version,
-		Metrics:          metrics,
-		Logger:           log,
+		Router:                  router,
+		Shards:                  shards,
+		Cache:                   cacheClient,
+		MaxSessionShards:        cfg.Consistency.MaxSessionShards,
+		MaxClockSkew:            cfg.Consistency.MaxClockSkew,
+		SynchronousInvalidation: cfg.Consistency.SynchronousInvalidation,
+		Version:                 version,
+		Metrics:                 metrics,
+		Logger:                  log,
 	})
 	if err != nil {
 		return err

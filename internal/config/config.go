@@ -78,6 +78,17 @@ type Consistency struct {
 	// EntryTTL is the last-resort safety net and the EVENTUAL convergence bound. Correctness comes
 	// from invalidation; the TTL is the backstop, not the strategy.
 	EntryTTL time.Duration `koanf:"entry_ttl"`
+
+	// SynchronousInvalidation controls whether the engine tombstones on the write path, after the
+	// commit and before the ack.
+	//
+	// This is a guarantee setting, not a performance knob. With it ON, a committed write is
+	// invisible to other sessions for microseconds. With it OFF, invalidation falls entirely to the
+	// CDC tailer and other sessions are bounded by CDCLagBound instead. Turning it off is a
+	// deliberate choice to pay less on the write path in exchange for a weaker promise to readers —
+	// and it exists as a flag mainly so the two can be MEASURED separately rather than one being
+	// credited with the other's work.
+	SynchronousInvalidation bool `koanf:"synchronous_invalidation"`
 }
 
 // Observability configures metrics, tracing and logging.
@@ -111,6 +122,7 @@ func Default() Config {
 			MaxAffectedKeys:             1000,
 			MaxSessionShards:            consistency.DefaultMaxSessionShards,
 			EntryTTL:                    4 * time.Hour,
+			SynchronousInvalidation:     true,
 		},
 		Observability: Observability{
 			MetricsListen: ":9100",
@@ -271,6 +283,7 @@ func (c Consistency) GuaranteeSettings() map[string]any {
 		"max_affected_keys":              c.MaxAffectedKeys,
 		"max_session_shards":             c.MaxSessionShards,
 		"entry_ttl":                      c.EntryTTL,
+		"synchronous_invalidation":       c.SynchronousInvalidation,
 	}
 }
 
