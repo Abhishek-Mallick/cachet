@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/Abhishek-Mallick/cachet/internal/breaker"
 )
 
 // The scripts are embedded rather than inlined as Go string literals so they can be linted, diffed
@@ -46,6 +48,25 @@ type Options struct {
 	// Timeout bounds a single cache operation. A cache that stops answering must degrade into a
 	// miss quickly rather than adding its own latency to the database's.
 	Timeout time.Duration
+
+	// Breaker configures the per-node proportional circuit breaker. The zero value gets
+	// DefaultBreaker.
+	Breaker breaker.Options
+}
+
+// DefaultBreaker is the breaker configuration a Client uses when none is supplied.
+//
+// A 10-second window is short enough to notice a node going bad within a handful of requests and
+// long enough that a single slow second does not start shedding. MinRequests=20 is the evidence
+// floor; FailureFloor=5% is the error rate every healthy node has anyway.
+func DefaultBreaker() breaker.Options {
+	return breaker.Options{
+		Window:       10 * time.Second,
+		Buckets:      10,
+		MinRequests:  20,
+		FailureFloor: 0.05,
+		MaxShed:      0.95,
+	}
 }
 
 // Client is Cachet's cache-side data path.
@@ -54,9 +75,10 @@ type Options struct {
 // independent of database shard routing (see Router). A Client is safe for concurrent use: the pool
 // map and the router are built once in New and never mutated, so no lock guards the read path.
 type Client struct {
-	router *Router
-	pools  map[string]*redis.Client
-	ttl    time.Duration
+	router   *Router
+	pools    map[string]*redis.Client
+	breakers *breaker.Group
+	ttl      time.Duration
 }
 
 // New connects to every cache node and verifies each one answers.
@@ -87,10 +109,20 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		return nil, err
 	}
 
+	bopts := opts.Breaker
+	if bopts.Window == 0 && bopts.Buckets == 0 {
+		bopts = DefaultBreaker()
+	}
+	breakers, err := breaker.NewGroup(bopts)
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Client{
-		router: router,
-		pools:  make(map[string]*redis.Client, len(router.Nodes())),
-		ttl:    opts.TTL,
+		router:   router,
+		pools:    make(map[string]*redis.Client, len(router.Nodes())),
+		breakers: breakers,
+		ttl:      opts.TTL,
 	}
 	for _, addr := range router.Nodes() {
 		rdb := redis.NewClient(&redis.Options{
@@ -110,20 +142,24 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 	return c, nil
 }
 
-// poolFor returns the connection pool for the node that owns key.
-func (c *Client) poolFor(key string) (*redis.Client, error) {
+// poolFor returns the connection pool for the node that owns key, and the node's name.
+func (c *Client) poolFor(key string) (*redis.Client, string, error) {
 	node, err := c.router.NodeFor(key)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	rdb, ok := c.pools[node]
 	if !ok {
 		// Unreachable while the router and the pool map are built together from one node list, and
 		// worth an explicit error rather than a nil dereference if that ever stops being true.
-		return nil, fmt.Errorf("cache: no connection pool for node %s", node)
+		return nil, "", fmt.Errorf("cache: no connection pool for node %s", node)
 	}
-	return rdb, nil
+	return rdb, node, nil
 }
+
+// BreakerStats reports what the breaker has observed per node, so an operator can be told which
+// node is being shed and why.
+func (c *Client) BreakerStats() map[string]breaker.Stats { return c.breakers.Nodes() }
 
 // Nodes returns the cache nodes this client is connected to, in sorted order.
 func (c *Client) Nodes() []string { return c.router.Nodes() }
@@ -139,18 +175,35 @@ func (c *Client) NodeFor(key string) (string, error) { return c.router.NodeFor(k
 // matter. A tombstoned entry reads as a miss: the marker is invisible to readers and exists only to
 // make a late fill lose its compare-and-set.
 func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
-	rdb, err := c.poolFor(key)
+	rdb, node, err := c.poolFor(key)
 	if err != nil {
 		return Entry{}, false, err
+	}
+
+	b := c.breakers.For(node)
+	if !b.Allow() {
+		// Shed: report a miss without touching the node. The read falls through to the database,
+		// which costs hit rate and saves the timeout this call was going to spend failing.
+		return Entry{}, false, nil
 	}
 
 	res, err := readScript.Run(ctx, rdb, []string{key}).Slice()
 	switch {
 	case errors.Is(err, redis.Nil):
+		// A miss is a healthy answer. Counting it as a failure would shed traffic to a node whose
+		// only crime is holding keys nobody has filled yet.
+		b.Success()
 		return Entry{}, false, nil
 	case err != nil:
+		b.Failure()
+		// The error is returned, not folded into a miss. The engine degrades it to a miss and falls
+		// through to the database, but it also LOGS it and counts it as
+		// cache_operations_total{op=get,result=error}. Swallowing it here would make a node outage
+		// indistinguishable from a cold cache in every dashboard — the breaker would be shedding
+		// traffic for a reason nobody could see.
 		return Entry{}, false, fmt.Errorf("cache: get %s: %w", key, err)
 	}
+	b.Success()
 	if len(res) == 0 {
 		return Entry{}, false, nil
 	}
@@ -173,9 +226,16 @@ func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
 // becomes visible: a healthy system rejects a few, and a sudden rise means reads are consistently
 // losing to writes on the same keys.
 func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
-	rdb, err := c.poolFor(key)
+	rdb, node, err := c.poolFor(key)
 	if err != nil {
 		return false, err
+	}
+
+	b := c.breakers.For(node)
+	if !b.Allow() {
+		// Shedding a fill costs only the hit this entry would have served later. The value is
+		// already on its way to the caller from the database.
+		return false, nil
 	}
 
 	negative := "0"
@@ -191,8 +251,10 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 		c.ttl.Milliseconds(),
 	).Int64()
 	if err != nil {
+		b.Failure()
 		return false, fmt.Errorf("cache: fill %s: %w", key, err)
 	}
+	b.Success()
 	return applied == 1, nil
 }
 
@@ -202,18 +264,29 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 // read that started before the write can land afterwards and refill the old value, with nothing
 // left to say it should not. The marker survives to reject exactly that fill.
 func (c *Client) Tombstone(ctx context.Context, key string, version uint64) (bool, error) {
-	rdb, err := c.poolFor(key)
+	rdb, node, err := c.poolFor(key)
 	if err != nil {
 		return false, err
 	}
 
+	// Deliberately NOT gated by the breaker, and the asymmetry is the point. Shedding a read costs
+	// hit rate: the value comes from the database instead, and nobody is misinformed. Shedding an
+	// invalidation costs correctness: the stale entry survives and the cache goes on serving a value
+	// the database has already changed, with no record that it was told otherwise.
+	//
+	// So a tombstone is always attempted, and a tombstone that cannot be applied is returned as an
+	// error rather than folded into a miss. The caller has to know its invalidation did not land —
+	// that is what makes the CDC backstop's job well-defined instead of a guess.
+	b := c.breakers.For(node)
 	applied, err := tombstoneCAS.Run(ctx, rdb, []string{key},
 		encodeVersion(version),
 		c.ttl.Milliseconds(),
 	).Int64()
 	if err != nil {
+		b.Failure()
 		return false, fmt.Errorf("cache: tombstone %s: %w", key, err)
 	}
+	b.Success()
 	return applied == 1, nil
 }
 

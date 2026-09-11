@@ -357,3 +357,82 @@ func TestNoCacheAddressesIsAccepted(t *testing.T) {
 		t.Fatalf("Validate() rejected a config with no cache: %v", err)
 	}
 }
+
+func TestBreakerDefaultsAreValid(t *testing.T) {
+	t.Parallel()
+
+	cfg := validCacheConfig()
+	cfg.Cache.Addresses = []string{"10.0.0.1:6379"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected the default breaker settings: %v", err)
+	}
+	if cfg.Cache.Breaker.MaxShed >= 1 {
+		t.Errorf("default max_shed is %v; it must stay below 1 so probes can detect recovery", cfg.Cache.Breaker.MaxShed)
+	}
+}
+
+func TestBreakerMaxShedOfOneIsRejected(t *testing.T) {
+	t.Parallel()
+
+	// Shedding 100% of traffic means never calling the node again, so recovery could never be
+	// observed and the breaker would latch open until the process restarted.
+	cfg := validCacheConfig()
+	cfg.Cache.Breaker.MaxShed = 1.0
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted cache.breaker.max_shed = 1.0")
+	}
+	if !strings.Contains(err.Error(), "max_shed") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}
+
+func TestBreakerFailureFloorOutOfRangeIsRejected(t *testing.T) {
+	t.Parallel()
+
+	for _, floor := range []float64{-0.1, 1.0, 1.5} {
+		cfg := validCacheConfig()
+		cfg.Cache.Breaker.FailureFloor = floor
+
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("Validate() accepted cache.breaker.failure_floor = %v", floor)
+			continue
+		}
+		if !strings.Contains(err.Error(), "failure_floor") {
+			t.Errorf("error %q does not name the offending field", err)
+		}
+	}
+}
+
+func TestBreakerNonPositiveWindowIsRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := validCacheConfig()
+	cfg.Cache.Breaker.Window = 0
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted cache.breaker.window = 0")
+	}
+	if !strings.Contains(err.Error(), "window") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}
+
+func TestBreakerNonPositiveBucketsIsRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := validCacheConfig()
+	cfg.Cache.Breaker.Buckets = 0
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted cache.breaker.buckets = 0")
+	}
+	if !strings.Contains(err.Error(), "buckets") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}

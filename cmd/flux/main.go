@@ -24,6 +24,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/Abhishek-Mallick/cachet/internal/breaker"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/cdc"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
@@ -72,6 +73,7 @@ func run() error {
 	cacheClient, err := cache.New(ctx, cache.Options{
 		Addresses: cfg.Cache.Addresses,
 		TTL:       cfg.Consistency.EntryTTL,
+		Breaker:   breakerOptions(cfg.Cache.Breaker),
 	})
 	if err != nil {
 		return err
@@ -186,4 +188,19 @@ func envMap() map[string]string {
 		}
 	}
 	return out
+}
+
+// breakerOptions maps the validated config onto the cache client's breaker settings.
+//
+// Config is the single source of truth: the client's own defaults exist for callers that construct
+// it directly (tests, tooling), and a binary that silently used those instead of the operator's
+// file would make every breaker knob in the config a lie.
+func breakerOptions(c config.Breaker) breaker.Options {
+	return breaker.Options{
+		Window:       c.Window,
+		Buckets:      c.Buckets,
+		MinRequests:  c.MinRequests,
+		FailureFloor: c.FailureFloor,
+		MaxShed:      c.MaxShed,
+	}
 }

@@ -55,6 +55,41 @@ type Shard struct {
 // compared against.
 type Cache struct {
 	Addresses []string `koanf:"addresses"`
+
+	// Breaker configures the per-node proportional circuit breaker.
+	//
+	// These are tuning knobs, not guarantee settings: shedding changes hit rate and latency, never
+	// what Cachet promises about staleness. A shed read is served from the database, which is at
+	// least as fresh as the cache would have been.
+	Breaker Breaker `koanf:"breaker"`
+}
+
+// Breaker configures how aggressively an unhealthy cache node is avoided.
+//
+// The breaker is proportional rather than binary: a node failing 30% of the time keeps serving
+// roughly 70% of its traffic. Tripping it fully open would send every key it owns to the database
+// at once, turning a partial cache degradation into a total one and delivering the load step to the
+// origin as a cliff instead of a slope.
+type Breaker struct {
+	// Window is how far back the breaker looks when judging a node's health.
+	Window time.Duration `koanf:"window"`
+
+	// Buckets is how finely the window is subdivided. Too few and the whole window ages out at
+	// once, which makes shedding oscillate.
+	Buckets int `koanf:"buckets"`
+
+	// MinRequests is the evidence threshold below which nothing is shed. Two failures out of two is
+	// a 100% failure rate and means nothing.
+	MinRequests int `koanf:"min_requests"`
+
+	// FailureFloor is the failure rate tolerated without shedding. Every healthy node has a nonzero
+	// error rate; treating that as unhealthy would shed traffic permanently for no gain.
+	FailureFloor float64 `koanf:"failure_floor"`
+
+	// MaxShed caps the shed fraction and MUST stay below 1. The remainder is the probe traffic that
+	// makes recovery self-detecting — at 1.0 the node is never called again, so it can never be
+	// observed to recover, and the breaker latches open until the process restarts.
+	MaxShed float64 `koanf:"max_shed"`
 }
 
 // Consistency holds the settings that change what Cachet PROMISES.
@@ -137,6 +172,15 @@ func Default() Config {
 			LogLevel:      "info",
 			LogFormat:     "text",
 			ServiceName:   "cachet",
+		},
+		Cache: Cache{
+			Breaker: Breaker{
+				Window:       10 * time.Second,
+				Buckets:      10,
+				MinRequests:  20,
+				FailureFloor: 0.05,
+				MaxShed:      0.95,
+			},
 		},
 		Shutdown: Shutdown{DrainTimeout: 15 * time.Second},
 	}
@@ -256,6 +300,10 @@ func (c Config) Validate() error {
 		seenCache[addr] = struct{}{}
 	}
 
+	if err := c.Cache.Breaker.validate(); err != nil {
+		return err
+	}
+
 	if _, err := consistency.ParseLevel(c.DefaultLevel); err != nil {
 		return fmt.Errorf("config: default_level: %w", err)
 	}
@@ -265,6 +313,27 @@ func (c Config) Validate() error {
 	}
 	if c.Shutdown.DrainTimeout <= 0 {
 		return fmt.Errorf("config: shutdown.drain_timeout must be positive, got %s", c.Shutdown.DrainTimeout)
+	}
+	return nil
+}
+
+func (b Breaker) validate() error {
+	if b.Window <= 0 {
+		return fmt.Errorf("config: cache.breaker.window must be positive, got %s", b.Window)
+	}
+	if b.Buckets <= 0 {
+		return fmt.Errorf("config: cache.breaker.buckets must be positive, got %d", b.Buckets)
+	}
+	if b.MinRequests < 0 {
+		return fmt.Errorf("config: cache.breaker.min_requests must not be negative, got %d", b.MinRequests)
+	}
+	if b.FailureFloor < 0 || b.FailureFloor >= 1 {
+		return fmt.Errorf("config: cache.breaker.failure_floor must be in [0,1), got %v", b.FailureFloor)
+	}
+	if b.MaxShed < 0 || b.MaxShed >= 1 {
+		// At 1.0 the node is never called again, so recovery can never be observed and the breaker
+		// latches open until the process restarts — a self-inflicted outage outliving its cause.
+		return fmt.Errorf("config: cache.breaker.max_shed must be in [0,1), got %v", b.MaxShed)
 	}
 	return nil
 }
