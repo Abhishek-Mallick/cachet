@@ -3,7 +3,14 @@ package storage
 import (
 	"errors"
 	"sort"
+
+	"github.com/Abhishek-Mallick/cachet/internal/hashring"
 )
+
+// ErrNoNodes is returned when a Router is built over an empty topology. It is re-exported from
+// hashring so that callers of the storage layer do not have to import the ring package to check
+// for the one error it produces.
+var ErrNoNodes = hashring.ErrNoNodes
 
 // ErrEmptyKey is returned when a caller asks to route an empty key. Routing one would succeed
 // deterministically and be silently cacheable, which surfaces later as unexplained cross-talk
@@ -17,13 +24,13 @@ type ShardID string
 
 // Router maps keys to database shards.
 //
-// It wraps a Ring with the operations the engine actually performs, of which the important one is
+// It wraps a hashring.Ring with the operations the engine actually performs, of which the important one is
 // Group: a BatchGet issues one query per shard, not one per key. That is the difference between a
 // batch API and a loop with extra steps.
 //
 // A Router is immutable and safe for concurrent use.
 type Router struct {
-	ring   *Ring
+	ring   *hashring.Ring
 	shards map[ShardID]struct{}
 }
 
@@ -49,7 +56,7 @@ func NewRouter(shards []ShardID) (*Router, error) {
 	}
 	sort.Strings(names)
 
-	return &Router{ring: NewRing(names...), shards: set}, nil
+	return &Router{ring: hashring.NewRing(names...), shards: set}, nil
 }
 
 // ShardFor returns the shard that owns key.

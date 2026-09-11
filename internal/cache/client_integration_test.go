@@ -26,6 +26,7 @@ import (
 func TestMain(m *testing.M) {
 	code := m.Run()
 	tearDown()
+	tearDownRing()
 	if code == 0 {
 		if err := goleak.Find(
 			goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),

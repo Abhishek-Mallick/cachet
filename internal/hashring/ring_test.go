@@ -1,4 +1,4 @@
-package storage_test
+package hashring_test
 
 import (
 	"errors"
@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Abhishek-Mallick/cachet/internal/storage"
+	"github.com/Abhishek-Mallick/cachet/internal/hashring"
 )
 
 func keys(n int) []string {
@@ -21,10 +21,10 @@ func keys(n int) []string {
 func TestRingWithNoNodesReturnsErrNoNodes(t *testing.T) {
 	t.Parallel()
 
-	r := storage.NewRing()
+	r := hashring.NewRing()
 
 	_, err := r.Lookup("entities:1")
-	if !errors.Is(err, storage.ErrNoNodes) {
+	if !errors.Is(err, hashring.ErrNoNodes) {
 		t.Errorf("Lookup on an empty ring returned %v, want ErrNoNodes", err)
 	}
 }
@@ -32,7 +32,7 @@ func TestRingWithNoNodesReturnsErrNoNodes(t *testing.T) {
 func TestRingRoutesEveryKeyToTheOnlyNode(t *testing.T) {
 	t.Parallel()
 
-	r := storage.NewRing("shard0")
+	r := hashring.NewRing("shard0")
 
 	for _, k := range keys(1000) {
 		got, err := r.Lookup(k)
@@ -51,8 +51,8 @@ func TestRingIsDeterministicAcrossInstances(t *testing.T) {
 	// Two engine processes must agree on routing without coordinating. If they disagree, one writes
 	// a row to a shard the other never reads it from — a data-loss bug that no cache test would
 	// catch. Insertion order must not matter either.
-	a := storage.NewRing("shard0", "shard1", "shard2")
-	b := storage.NewRing("shard2", "shard0", "shard1")
+	a := hashring.NewRing("shard0", "shard1", "shard2")
+	b := hashring.NewRing("shard2", "shard0", "shard1")
 
 	for _, k := range keys(5000) {
 		ka, err := a.Lookup(k)
@@ -73,7 +73,7 @@ func TestRingDistributesKeysWithinFivePercent(t *testing.T) {
 	t.Parallel()
 
 	nodes := []string{"shard0", "shard1", "shard2"}
-	r := storage.NewRing(nodes...)
+	r := hashring.NewRing(nodes...)
 
 	const total = 120_000
 	counts := map[string]int{}
@@ -100,8 +100,8 @@ func TestRingDistributesKeysWithinFivePercent(t *testing.T) {
 func TestAddingANodeMovesOnlyKeysDestinedForIt(t *testing.T) {
 	t.Parallel()
 
-	before := storage.NewRing("shard0", "shard1", "shard2")
-	after := storage.NewRing("shard0", "shard1", "shard2", "shard3")
+	before := hashring.NewRing("shard0", "shard1", "shard2")
+	after := hashring.NewRing("shard0", "shard1", "shard2", "shard3")
 
 	const total = 60_000
 	moved := 0
@@ -136,8 +136,8 @@ func TestAddingANodeMovesOnlyKeysDestinedForIt(t *testing.T) {
 func TestRemovingANodeSpreadsItsKeysWithoutHotspotting(t *testing.T) {
 	t.Parallel()
 
-	before := storage.NewRing("shard0", "shard1", "shard2", "shard3")
-	after := storage.NewRing("shard0", "shard1", "shard2")
+	before := hashring.NewRing("shard0", "shard1", "shard2", "shard3")
+	after := hashring.NewRing("shard0", "shard1", "shard2")
 
 	const total = 60_000
 	inherited := map[string]int{}
@@ -180,7 +180,7 @@ func TestRemovingANodeSpreadsItsKeysWithoutHotspotting(t *testing.T) {
 func TestRingNodesAreReportedSorted(t *testing.T) {
 	t.Parallel()
 
-	r := storage.NewRing("shard2", "shard0", "shard1")
+	r := hashring.NewRing("shard2", "shard0", "shard1")
 
 	got := r.Nodes()
 	want := []string{"shard0", "shard1", "shard2"}
@@ -197,7 +197,7 @@ func TestRingNodesAreReportedSorted(t *testing.T) {
 func TestRingIgnoresDuplicateNodes(t *testing.T) {
 	t.Parallel()
 
-	r := storage.NewRing("shard0", "shard1", "shard0")
+	r := hashring.NewRing("shard0", "shard1", "shard0")
 
 	if got := len(r.Nodes()); got != 2 {
 		t.Errorf("Nodes() has %d entries, want 2 — duplicates must not double a node's share", got)
@@ -207,7 +207,7 @@ func TestRingIgnoresDuplicateNodes(t *testing.T) {
 func TestRingLookupIsSafeForConcurrentUse(t *testing.T) {
 	t.Parallel()
 
-	r := storage.NewRing("shard0", "shard1", "shard2")
+	r := hashring.NewRing("shard0", "shard1", "shard2")
 	ks := keys(2000)
 
 	var wg sync.WaitGroup

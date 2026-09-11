@@ -49,14 +49,25 @@ type Options struct {
 }
 
 // Client is Cachet's cache-side data path.
+//
+// It holds one connection pool per cache node and routes every key through its own Router, which is
+// independent of database shard routing (see Router). A Client is safe for concurrent use: the pool
+// map and the router are built once in New and never mutated, so no lock guards the read path.
 type Client struct {
-	rdb *redis.Client
-	ttl time.Duration
+	router *Router
+	pools  map[string]*redis.Client
+	ttl    time.Duration
 }
 
-// New connects to the cache and verifies it answers.
+// New connects to every cache node and verifies each one answers.
 //
-// Failing at boot beats discovering on the first user request that the cache was never reachable.
+// Failing at boot beats discovering on the first user request that a node was never reachable — and
+// it must be EVERY node, not the first one that responds. A client that started with two of three
+// nodes down would silently route a third of the key space into errors, present it as a collapsed
+// hit rate, and give no indication that the cause was a node that never came up.
+//
+// Runtime unhealth is a different problem with a different answer: that is the circuit breaker's
+// job, not a reason to refuse to boot.
 func New(ctx context.Context, opts Options) (*Client, error) {
 	if len(opts.Addresses) == 0 {
 		return nil, errors.New("cache: no addresses configured")
@@ -71,20 +82,55 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		timeout = 250 * time.Millisecond
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:         opts.Addresses[0],
-		DialTimeout:  2 * time.Second,
-		ReadTimeout:  timeout,
-		WriteTimeout: timeout,
-		PoolSize:     64,
-	})
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		_ = rdb.Close()
-		return nil, fmt.Errorf("cache: ping %s: %w", opts.Addresses[0], err)
+	router, err := NewRouter(opts.Addresses)
+	if err != nil {
+		return nil, err
 	}
 
-	return &Client{rdb: rdb, ttl: opts.TTL}, nil
+	c := &Client{
+		router: router,
+		pools:  make(map[string]*redis.Client, len(router.Nodes())),
+		ttl:    opts.TTL,
+	}
+	for _, addr := range router.Nodes() {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:         addr,
+			DialTimeout:  2 * time.Second,
+			ReadTimeout:  timeout,
+			WriteTimeout: timeout,
+			PoolSize:     64,
+		})
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			_ = rdb.Close()
+			_ = c.Close()
+			return nil, fmt.Errorf("cache: ping %s: %w", addr, err)
+		}
+		c.pools[addr] = rdb
+	}
+	return c, nil
 }
+
+// poolFor returns the connection pool for the node that owns key.
+func (c *Client) poolFor(key string) (*redis.Client, error) {
+	node, err := c.router.NodeFor(key)
+	if err != nil {
+		return nil, err
+	}
+	rdb, ok := c.pools[node]
+	if !ok {
+		// Unreachable while the router and the pool map are built together from one node list, and
+		// worth an explicit error rather than a nil dereference if that ever stops being true.
+		return nil, fmt.Errorf("cache: no connection pool for node %s", node)
+	}
+	return rdb, nil
+}
+
+// Nodes returns the cache nodes this client is connected to, in sorted order.
+func (c *Client) Nodes() []string { return c.router.Nodes() }
+
+// NodeFor returns the cache node that owns key, so operators can answer "where does this live?"
+// without reimplementing the ring.
+func (c *Client) NodeFor(key string) (string, error) { return c.router.NodeFor(key) }
 
 // Get reads one entry.
 //
@@ -93,7 +139,12 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 // matter. A tombstoned entry reads as a miss: the marker is invisible to readers and exists only to
 // make a late fill lose its compare-and-set.
 func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
-	res, err := readScript.Run(ctx, c.rdb, []string{key}).Slice()
+	rdb, err := c.poolFor(key)
+	if err != nil {
+		return Entry{}, false, err
+	}
+
+	res, err := readScript.Run(ctx, rdb, []string{key}).Slice()
 	switch {
 	case errors.Is(err, redis.Nil):
 		return Entry{}, false, nil
@@ -122,12 +173,17 @@ func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
 // becomes visible: a healthy system rejects a few, and a sudden rise means reads are consistently
 // losing to writes on the same keys.
 func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
+	rdb, err := c.poolFor(key)
+	if err != nil {
+		return false, err
+	}
+
 	negative := "0"
 	if e.Negative {
 		negative = "1"
 	}
 
-	applied, err := fillCAS.Run(ctx, c.rdb, []string{key},
+	applied, err := fillCAS.Run(ctx, rdb, []string{key},
 		encodeVersion(e.RowVersion),
 		encodeVersion(e.FillVersion),
 		e.Payload,
@@ -146,7 +202,12 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 // read that started before the write can land afterwards and refill the old value, with nothing
 // left to say it should not. The marker survives to reject exactly that fill.
 func (c *Client) Tombstone(ctx context.Context, key string, version uint64) (bool, error) {
-	applied, err := tombstoneCAS.Run(ctx, c.rdb, []string{key},
+	rdb, err := c.poolFor(key)
+	if err != nil {
+		return false, err
+	}
+
+	applied, err := tombstoneCAS.Run(ctx, rdb, []string{key},
 		encodeVersion(version),
 		c.ttl.Milliseconds(),
 	).Int64()
@@ -192,8 +253,12 @@ func entryFromLua(res []any) (Entry, error) {
 // It exists for tests and for operator recovery, never for the request path: dropping the whole
 // cache to fix one key is how a stale-data incident becomes an availability incident.
 func (c *Client) Flush(ctx context.Context) error {
-	if err := c.rdb.FlushDB(ctx).Err(); err != nil {
-		return fmt.Errorf("cache: flush: %w", err)
+	// Every node, not just the first. A Flush that cleared one node would leave an operator
+	// believing the cache was empty while the rest of it kept serving entries.
+	for _, addr := range c.router.Nodes() {
+		if err := c.pools[addr].FlushDB(ctx).Err(); err != nil {
+			return fmt.Errorf("cache: flush %s: %w", addr, err)
+		}
 	}
 	return nil
 }
@@ -203,8 +268,16 @@ func (c *Client) TTL() time.Duration { return c.ttl }
 
 // Close releases the connection pool.
 func (c *Client) Close() error {
-	if err := c.rdb.Close(); err != nil {
-		return fmt.Errorf("cache: close: %w", err)
+	// Every pool gets closed even if an earlier one fails, so one bad node cannot leak the
+	// goroutines belonging to the others (CONTRIBUTING.md rule 2).
+	var firstErr error
+	for addr, rdb := range c.pools {
+		if err := rdb.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("cache: close %s: %w", addr, err)
+		}
+	}
+	if firstErr != nil {
+		return firstErr
 	}
 	return nil
 }

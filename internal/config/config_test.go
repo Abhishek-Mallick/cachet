@@ -292,3 +292,68 @@ func TestBootLogRendersDurationsReadably(t *testing.T) {
 		}
 	}
 }
+
+func validCacheConfig() config.Config {
+	cfg := config.Default()
+	cfg.Shards = []config.Shard{{ID: "shard0", DSN: "root:x@tcp(127.0.0.1:3306)/cachet"}}
+	return cfg
+}
+
+func TestEmptyCacheAddressIsRejected(t *testing.T) {
+	t.Parallel()
+
+	// An empty address routes a share of the key space to nothing. The ring would still place keys
+	// on it, and every one of those reads would error rather than miss.
+	cfg := validCacheConfig()
+	cfg.Cache.Addresses = []string{"10.0.0.1:6379", ""}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted an empty cache address")
+	}
+	if !strings.Contains(err.Error(), "cache.addresses[1]") {
+		t.Errorf("error %q does not name the offending field", err)
+	}
+}
+
+func TestDuplicateCacheAddressesAreRejected(t *testing.T) {
+	t.Parallel()
+
+	// The router deduplicates, so a config listing the same node twice would boot and quietly run a
+	// two-node ring where the operator believes there are three. Capacity planning and the blast
+	// radius of a node loss would both be wrong, with nothing in the logs to say so.
+	cfg := validCacheConfig()
+	cfg.Cache.Addresses = []string{"10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.1:6379"}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted a duplicate cache address")
+	}
+	if !strings.Contains(err.Error(), "10.0.0.1:6379") {
+		t.Errorf("error %q does not name the duplicated address", err)
+	}
+}
+
+func TestMultipleCacheAddressesAreAccepted(t *testing.T) {
+	t.Parallel()
+
+	cfg := validCacheConfig()
+	cfg.Cache.Addresses = []string{"10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected a three-node cache ring: %v", err)
+	}
+}
+
+func TestNoCacheAddressesIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	// Running without a cache is a supported configuration: it is the uncached baseline every
+	// benchmark row is compared against.
+	cfg := validCacheConfig()
+	cfg.Cache.Addresses = nil
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected a config with no cache: %v", err)
+	}
+}

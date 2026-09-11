@@ -44,7 +44,15 @@ type Shard struct {
 	DSN string `koanf:"dsn"`
 }
 
-// Cache is the cache server this engine talks to. Unused until the cache path lands in Phase 1.
+// Cache is the cache ring this engine talks to.
+//
+// Addresses are cache NODES, routed by their own consistent-hash ring that is independent of
+// database shard routing (product spec §6, Tier 0). Listing more than one is the normal production
+// shape: an entry lives on exactly one node, and losing a node costs only that node's share of the
+// key space, spread across every database shard rather than concentrated on one.
+//
+// An empty list disables caching entirely, which is the uncached baseline every benchmark row is
+// compared against.
 type Cache struct {
 	Addresses []string `koanf:"addresses"`
 }
@@ -230,6 +238,22 @@ func (c Config) Validate() error {
 			return fmt.Errorf("config: duplicate shard id %q", sh.ID)
 		}
 		seen[sh.ID] = struct{}{}
+	}
+
+	// An empty cache address list is legitimate — it is the uncached baseline. A list containing
+	// junk is not.
+	seenCache := make(map[string]struct{}, len(c.Cache.Addresses))
+	for i, addr := range c.Cache.Addresses {
+		if addr == "" {
+			return fmt.Errorf("config: cache.addresses[%d] is empty", i)
+		}
+		if _, dup := seenCache[addr]; dup {
+			// The cache router deduplicates, so this would boot and quietly run a smaller ring than
+			// the operator configured. Both capacity planning and the blast radius of losing a node
+			// would then be wrong, with nothing in the logs to say so.
+			return fmt.Errorf("config: duplicate cache address %q", addr)
+		}
+		seenCache[addr] = struct{}{}
 	}
 
 	if _, err := consistency.ParseLevel(c.DefaultLevel); err != nil {

@@ -1,4 +1,12 @@
-package storage
+// Package hashring implements the consistent-hash ring shared by Cachet's two independent routing
+// layers.
+//
+// It lives in its own package rather than inside either caller. Cachet routes keys to database
+// shards and cache entries to cache nodes, and those two mappings must never become coupled: if
+// the cache imported the storage layer to borrow its ring, a change to shard membership would sit
+// one careless edit away from changing cache routing. Keeping the implementation neutral means
+// neither side can reach the other, while both still share one tested, uniform hash.
+package hashring
 
 import (
 	"errors"
@@ -10,7 +18,7 @@ import (
 // ErrNoNodes is returned by Lookup when the ring holds no nodes. It is a sentinel rather than an
 // ad-hoc error because callers legitimately branch on it during startup, before shard discovery
 // has completed.
-var ErrNoNodes = errors.New("storage: ring has no nodes")
+var ErrNoNodes = errors.New("hashring: ring has no nodes")
 
 // ringVirtualNodes is how many points each node occupies on the ring.
 //
@@ -22,10 +30,11 @@ const ringVirtualNodes = 256
 
 // Ring maps keys to nodes by consistent hashing.
 //
-// Cachet uses two independent Rings, and keeping them independent is a design requirement rather
-// than an accident: one routes keys to database shards, the other routes cache entries to cache
-// nodes. Sharing a ring would mean the loss of one cache node concentrates its misses onto a single
-// database shard — the exact hot-spot the separation exists to prevent (product spec §6, Tier 0).
+// Cachet builds two independent Rings from this type, and keeping them independent is a design
+// requirement rather than an accident: one routes keys to database shards, the other routes cache
+// entries to cache nodes. Sharing one instance would mean the loss of a cache node concentrates its
+// misses onto a single database shard — the exact hot-spot the separation exists to prevent
+// (product spec §6, Tier 0).
 //
 // A Ring is immutable after construction and therefore safe for concurrent use without locking.
 // Changing membership means building a new Ring and swapping the pointer, which also makes
