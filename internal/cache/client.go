@@ -339,6 +339,37 @@ func (c *Client) Flush(ctx context.Context) error {
 // TTL returns the configured entry lifetime.
 func (c *Client) TTL() time.Duration { return c.ttl }
 
+// RemainingTTL reports how much longer an entry will live, and whether it is there at all.
+//
+// It exists for operator tooling rather than the request path: "when does this expire?" is the
+// second question anyone asks about a cached entry, right after "is it there?", and answering it by
+// reading the configured TTL would be a guess rather than a measurement.
+//
+// Deliberately not gated by the breaker. This is a human asking a direct question about one key,
+// not traffic to be shed, and an answer of "probably" would be useless during an incident.
+func (c *Client) RemainingTTL(ctx context.Context, key string) (time.Duration, bool, error) {
+	rdb, _, err := c.poolFor(key)
+	if err != nil {
+		return 0, false, err
+	}
+
+	d, err := rdb.PTTL(ctx, key).Result()
+	if err != nil {
+		return 0, false, fmt.Errorf("cache: ttl %s: %w", key, err)
+	}
+	// Redis reports -2 for "no such key" and -1 for "no expiry". The second must never happen here:
+	// every entry is written with a TTL, so an entry without one is a bug worth surfacing rather
+	// than rendering as a blank column.
+	switch d {
+	case -2:
+		return 0, false, nil
+	case -1:
+		return 0, true, fmt.Errorf("cache: entry %s has no expiry set", key)
+	default:
+		return d, true, nil
+	}
+}
+
 // Close releases the connection pool.
 func (c *Client) Close() error {
 	// Every pool gets closed even if an earlier one fails, so one bad node cannot leak the
