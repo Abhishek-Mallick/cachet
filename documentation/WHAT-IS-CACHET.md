@@ -96,7 +96,24 @@ Two paths, deliberately separable so neither gets credit for the other's work:
   made directly to the database by migrations and admin scripts.
 
 Both are versioned compare-and-set, so replaying the binlog is idempotent and a restarted tailer
-cannot undo newer state.
+cannot undo newer state. That is not an aspiration — it is the Phase 2 exit gate: the tailer is
+killed mid-stream with writes in flight, restarted from its checkpoint, and then deliberately
+rewound so it replays events it has already applied.
+
+### 2.5 · A cache ring that is not the database's ring
+
+Cache entries are routed by their own consistent-hash ring, independent of database sharding. If the
+two were correlated, every key held by a failed cache node would miss to the *same* database shard —
+one node's failure becoming one shard's overload, the exact hot-spot a cache is supposed to prevent.
+Independent, those misses spread across every shard and the database sees a uniform bump.
+
+An unhealthy node is handled by a **proportional** circuit breaker rather than a latch. A node
+failing 30% of the time is still answering 70% of its reads; tripping it fully open throws that away
+and delivers the load step to the origin as a cliff. Shedding scales with the observed failure rate
+and is capped below 100%, so probe traffic always survives to notice recovery.
+
+The asymmetry matters: **reads and fills are shed, invalidations never are.** Shedding a read costs
+hit rate. Shedding an invalidation costs correctness.
 
 ### 2 · Consistency as a per-request parameter
 

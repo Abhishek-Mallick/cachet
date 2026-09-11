@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <sub><strong>⚠️ Under active development.</strong> Phases 0–1 complete, Phase 2 in progress.
+  <sub><strong>⚠️ Under active development.</strong> Phases 0–2 complete, Phase 3 next.
   Not production software. <a href="#status">See what works today →</a></sub>
 </p>
 
@@ -155,13 +155,13 @@ the benchmarks more interesting.
 
 ## Status
 
-**Currently: Phase 2, four of six items landed.**
+**Currently: Phase 2 complete. Phase 3 next.**
 
 | Phase | | What it delivers |
 |---|---|---|
 | **0 · Foundation** | ✅ | Sharded MyRocks stack, consistent-hash ring, HLC versioning, gRPC API over TCP **and** Unix sockets, RED metrics + Grafana, open-loop Zipfian harness, uncached baseline |
 | **1 · Naive TTL cache** | ✅ | Cache-aside with TTL only. Staleness knowingly bad, and asserted as a test |
-| **2 · Exact invalidation** | 🔄 | CDC tailer + checkpointing, versioned CAS, negative caching, cache ring, circuit breaker, `cachetctl` |
+| **2 · Exact invalidation** | ✅ | CDC tailer + checkpointing, versioned CAS, negative caching, independent cache ring, proportional circuit breaker, `cachetctl` |
 | **3 · Consistency model** | ⬜ | Affected-key extraction, session tokens, 4 levels, conformance suite, Go SDK with OTel watermark propagation |
 | **4 · Leases · adaptive admission · Sextant** | ⬜ | The stampede graph, per-key r:w admission, continuous verification |
 | **5 · Proof** | ⬜ | 9 injected faults, each caught *and explained* |
@@ -173,14 +173,16 @@ the benchmarks more interesting.
 |---|---|
 | `cachet` — query engine, cache-aware reads, versioned CAS fill/tombstone | ✅ Working |
 | `flux` — CDC tailer, durable atomic binlog checkpoints | ✅ Working |
+| `cachetctl` — operator CLI: status, ring, inspect, invalidate, checkpoint | ✅ Working |
 | `benchctl` — open-loop driver, staleness probe, report generator | ✅ Working |
 | Synchronous write-path invalidation | ✅ Working *(arrived early from Phase 3)* |
 | Negative caching with read-own-inserts | ✅ Working |
-| Independent cache ring · circuit breaker · `cachetctl` | ⬜ Phase 2 remainder |
+| Independent cache ring — routed separately from database shards | ✅ Working |
+| Proportional circuit breaker — sheds a fraction, never all | ✅ Working |
 | `pkg/cachet` Go SDK · consistency conformance suite | ⬜ Phase 3 |
 | Leases · adaptive admission · Sextant | ⬜ Phase 4 |
 
-### Two results worth knowing about
+### Three results worth knowing about
 
 **Read-own-writes held in Phase 1 with no invalidation at all.** Writes never touched the cache, yet
 a session carrying its token could not be served a stale entry — because the watermark check rejects
@@ -192,6 +194,13 @@ existed.
 production 4-hour TTL it reached 93.9% and 46 origin QPS; exact invalidation gives some of that back
 (89.7%, 78 QPS). Two of the TTL-only runs hit 100% with zero origin load. It is "perfect" precisely
 to the extent that it is wrong. Publishing that trade is the point.
+
+**Shedding a read costs hit rate; shedding an invalidation costs correctness.** The circuit breaker
+gates reads and fills but never tombstones. A shed read is served from the database and nobody is
+misinformed — but a shed invalidation leaves a stale entry alive, still serving a value the database
+has already changed. That asymmetry is enforced by a test, and the test was checked by making the
+mistake on purpose: gating tombstones produced *"10 of 10 tombstones to a dead node were silently
+swallowed."*
 
 ## Benchmarks
 

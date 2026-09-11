@@ -3,9 +3,9 @@
 > **What Cachet is and why:** [WHAT-IS-CACHET.md](./WHAT-IS-CACHET.md).
 > **Exact guarantees:** [`CONSISTENCY.md`](../CONSISTENCY.md).
 >
-> ⚠️ **Cachet is under active development and is not production software.** Phases 0–1 are
-> complete, Phase 2 is in progress. This page documents **what runs today** and marks everything
-> else as planned. See [README → Status](../README.md#status).
+> ⚠️ **Cachet is under active development and is not production software.** Phases 0–2 are
+> complete; Phase 3 is next. This page documents **what runs today** and marks everything else as
+> planned. See [README → Status](../README.md#status).
 
 ---
 
@@ -16,8 +16,9 @@
 | Query engine — gRPC data plane, cache-aware reads, versioned CAS fill/tombstone | `cachet` | ✅ Working |
 | CDC tailer — MySQL binlog → invalidation, durable checkpoints | `flux` | ✅ Working |
 | Benchmark driver — open-loop, Zipfian, staleness probe, report generator | `benchctl` | ✅ Working |
-| Operator CLI | `cachetctl` | ⬜ Phase 2, not started |
+| Operator CLI — status, ring, inspect, invalidate, checkpoint | `cachetctl` | ✅ Working |
 | Consistency verifier | `sextant` | ⬜ Phase 4c, not started |
+| Independent cache ring + proportional circuit breaker | (in `cachet`) | ✅ Working |
 | Go SDK (`pkg/cachet`) | — | ⬜ Phase 3, not started — call the gRPC API directly for now |
 
 ---
@@ -85,7 +86,18 @@ shards:
   - { id: shard2, dsn: "user:pass@tcp(127.0.0.1:3308)/cachet" }
 
 cache:
-  addresses: ["127.0.0.1:6379"]
+  # Cache NODES, routed by their own ring — independent of the shards above. Losing one
+  # costs only its share of the key space, spread across every shard rather than
+  # concentrated on one. An empty list disables caching (the uncached baseline).
+  addresses: ["10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379"]
+
+  # Per-node proportional circuit breaker. Tuning knobs, not guarantee settings.
+  breaker:
+    window: 10s          # how far back health is judged
+    buckets: 10          # window subdivisions; too few and shedding oscillates
+    min_requests: 20     # evidence floor — 2 failures out of 2 means nothing
+    failure_floor: 0.05  # error rate tolerated without shedding
+    max_shed: 0.95       # MUST stay below 1; the remainder is recovery probe traffic
 
 default_level: SESSION
 
@@ -181,6 +193,55 @@ insert invalidates that negative entry.
 
 ---
 
+## Operating it — `cachetctl`
+
+The control plane. Five commands, each answering a question you ask during an incident. Every one
+takes `-config <path>` and `-json`.
+
+```bash
+cachetctl status                          # is every cache node answering, and how fast?
+cachetctl ring                            # both routing rings, and each node's share of the keys
+cachetctl inspect entities:1              # where does this key live, and what do we hold for it?
+cachetctl invalidate entities:1 -dry-run  # preview the blast radius
+cachetctl invalidate entities:1           # the escape hatch
+cachetctl checkpoint -state-dir ./.flux   # how far has each shard's tailer got?
+```
+
+`inspect` is the one you will reach for most:
+
+```
+key         entities:1
+cache node  127.0.0.1:6379
+shard       shard1
+cached      yes — value
+row ver     117253494587916288   (orders fills against each other)
+fill ver    117253501905666048   (answers freshness)
+payload     256 bytes
+expires in  3h59m56s
+```
+
+**Both versions, always.** They answer different questions, and the gap between them above is the
+design working: this row has not been written in a while (old `row ver`) but was read from the
+database moments ago (recent `fill ver`). Shown only one of them, you cannot tell a stale entry from
+an old row that is perfectly fresh.
+
+`inspect` also distinguishes a **negative entry** ("we know this row does not exist") from an absent
+one ("we have not looked"). They are identical to a reader and completely different to you.
+
+`ring` deliberately shows **both** rings side by side, because the cache ring and the shard ring are
+independent and the most expensive assumption you can make is that they are the same thing under two
+names.
+
+> **On `invalidate`:** it stamps the tombstone from the current clock, so it beats anything already
+> in flight. Use `-dry-run` first. It is one key at a time on purpose — the blast radius of a manual
+> invalidation should be something you can state out loud before you run it.
+
+Commands that would need Sextant (`key trace`) or adaptive admission (`admission explain`) are
+**absent rather than stubbed**. A control plane that answers "why was this stale?" with a placeholder
+is worse than one that admits it cannot answer yet.
+
+---
+
 ## Running the CDC tailer
 
 `flux` reads the MySQL binlog and invalidates cache entries, as a backstop to synchronous
@@ -196,7 +257,13 @@ Replay is idempotent: every mutation is a versioned compare-and-set, so a tailer
 events cannot undo newer state.
 
 **The stack requires `binlog_format=ROW` and `binlog_row_image=FULL`** — both are set in
-`test/env/compose.yml`.
+`test/env/compose.yml`. A minimal row image omits unchanged columns, and an invalidation without the
+row's version cannot take part in the compare-and-set: it could only delete unconditionally, which
+reopens the delete-versus-fill race. Flux refuses to tail a table that has no `version` column for
+the same reason.
+
+Check its progress with `cachetctl checkpoint`. A shard with no checkpoint is reported as such —
+"the tailer for shard2 was never started" is exactly the incident worth seeing.
 
 ---
 
