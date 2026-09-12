@@ -69,6 +69,17 @@ type CacheOptions struct {
 	// test prove that a guarantee holds on the session watermark ALONE, with no invalidation
 	// helping — which is the only way to know which mechanism is actually carrying it.
 	SynchronousInvalidation bool
+
+	// PreserveCache keeps whatever the cache already holds instead of flushing it at startup.
+	//
+	// Needed by failover tests, which start a SECOND engine against state the first one left
+	// behind. Flushing there would erase the very thing under test and let the new engine pass by
+	// reading everything from the database — a green test proving nothing about the cache.
+	//
+	// Off by default: every other suite wants a clean cache, because the compose stack's cache is
+	// shared and persistent, and a test asserting "the first read is a miss" would otherwise pass on
+	// a clean machine and fail on the second run.
+	PreserveCache bool
 }
 
 // StartCached brings up an engine backed by the test environment's cache, with invalidation on.
@@ -98,8 +109,10 @@ func StartCachedWith(ctx context.Context, t *testing.T, opts CacheOptions, liste
 	//
 	// This is safe because tests within a package run sequentially unless they call t.Parallel(),
 	// and the e2e tests deliberately do not.
-	if err := c.Flush(ctx); err != nil {
-		t.Fatalf("flush cache: %v", err)
+	if !opts.PreserveCache {
+		if err := c.Flush(ctx); err != nil {
+			t.Fatalf("flush cache: %v", err)
+		}
 	}
 
 	cluster := start(ctx, t, c, opts.SynchronousInvalidation, listen...)
