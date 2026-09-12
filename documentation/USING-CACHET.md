@@ -3,8 +3,8 @@
 > **What Cachet is and why:** [WHAT-IS-CACHET.md](./WHAT-IS-CACHET.md).
 > **Exact guarantees:** [`CONSISTENCY.md`](../CONSISTENCY.md).
 >
-> ⚠️ **Cachet is under active development and is not production software.** Phases 0–2 are
-> complete; Phase 3 is next. This page documents **what runs today** and marks everything else as
+> ⚠️ **Cachet is under active development and is not production software.** Phases 0–3 are
+> complete; Phase 4 is next. This page documents **what runs today** and marks everything else as
 > planned. See [README → Status](../README.md#status).
 
 ---
@@ -19,7 +19,7 @@
 | Operator CLI — status, ring, inspect, invalidate, checkpoint | `cachetctl` | ✅ Working |
 | Consistency verifier | `sextant` | ⬜ Phase 4c, not started |
 | Independent cache ring + proportional circuit breaker | (in `cachet`) | ✅ Working |
-| Go SDK (`pkg/cachet`) | — | ⬜ Phase 3, not started — call the gRPC API directly for now |
+| Go SDK — carries the session, propagates it via OTel baggage | `pkg/cachet` | ✅ Working |
 
 ---
 
@@ -140,11 +140,85 @@ These change what Cachet **promises**. They are logged at boot and exported as
 
 ---
 
-## The API
+## Using the Go SDK
 
-gRPC, `cachet.v1.CacheService`. There is no Go SDK yet — generate a client from
-[`api/cachet/v1/cachet.proto`](../api/cachet/v1/cachet.proto) or use the generated stubs in
-`api/cachet/v1/`.
+`pkg/cachet` is the supported way to talk to Cachet, and the reason is not convenience.
+
+**The session guarantee is carried by a token, and a token nobody propagates is a guarantee nobody
+has.** On raw gRPC you would thread a watermark through every call and every service hop by hand.
+The ones you forgot would not fail — they would quietly return staler data than the level you asked
+for, on exactly the requests where it mattered. The client carries it so "I forgot" is not a
+reachable state.
+
+```go
+import (
+    "github.com/Abhishek-Mallick/cachet/pkg/cachet"
+    "github.com/Abhishek-Mallick/cachet/pkg/consistency"
+)
+
+c, err := cachet.Dial(ctx, "unix:///var/run/cachet.sock")
+defer c.Close()
+
+// Write, then read. No token appears anywhere — the client kept it.
+if _, err := c.Put(ctx, "entities:1", cachet.Record{TenantID: 1, Payload: body}); err != nil { ... }
+
+got, err := c.Get(ctx, "entities:1")           // SESSION by default
+got, err = c.Get(ctx, "entities:1", cachet.AtLevel(consistency.Strong))
+got, err = c.Get(ctx, "entities:1", cachet.WithinStaleness(2*time.Second))  // BOUNDED(2s)
+
+if got.Found {
+    use(got.Record.Payload)
+}
+if got.Meta.Degraded {
+    // You may ignore this. It must be a decision, not an accident.
+    log.Warn("served below the requested level", "reason", got.Meta.DegradedReason)
+}
+```
+
+`Dial` performs the protocol handshake, so an incompatible server is a **startup** error rather than
+a confusing failure on whichever request first touches the field that changed.
+
+### Crossing a service boundary
+
+The watermark travels in **OpenTelemetry baggage**, which every instrumented transport already
+propagates. A bespoke header would mean teaching every hop about Cachet first — and the hops nobody
+remembered would silently downgrade the caller.
+
+```go
+// Upstream, before calling another service:
+ctx = cachet.ContextWithSession(ctx, client.Session())
+ctx, err = cachet.InjectSession(ctx)
+
+// Downstream, on an inbound request:
+if w, ok := cachet.ExtractSession(ctx); ok {
+    client.AdoptSession(w)   // merges, never replaces — your own writes still count
+}
+```
+
+Without this, the downstream starts with an empty session and reads as if it had written nothing.
+That is documented behaviour, not a bug (`CONSISTENCY.md` §4) — but it is a weaker guarantee than
+the one you asked for, so it is worth doing.
+
+### Conditional writes
+
+```go
+res, err := c.UpdateWhere(ctx, cachet.Predicate{TenantID: 1, MatchStatus: 1, SetStatus: 2})
+
+if res.Degraded {
+    // Too many rows to resolve exactly. The WRITE committed; what was given up is the exact key
+    // list. Your own reads are still correct; other sessions see these keys as
+    // BOUNDED(res.EffectiveStalenessBound) until the CDC tailer catches up.
+}
+// res.AffectedKeys is exact when Degraded is false, and EMPTY when it is true — never partial.
+```
+
+---
+
+## The gRPC API
+
+`cachet.v1.CacheService`. Use this directly only if you are not writing Go; otherwise prefer the SDK
+above, which handles session propagation for you. Generate a client from
+[`api/cachet/v1/cachet.proto`](../api/cachet/v1/cachet.proto).
 
 | RPC | Purpose |
 |---|---|
@@ -153,6 +227,7 @@ gRPC, `cachet.v1.CacheService`. There is no Go SDK yet — generate a client fro
 | `BatchGet` | N independent reads. **Deliberately no cross-key snapshot at any level** — Cachet caches rows, not transactions |
 | `Put` | Write-through. Commits to the shard, then invalidates |
 | `Delete` | Removes the row and its cache entry |
+| `UpdateWhere` | Conditional write. Resolves affected keys exactly inside the transaction and invalidates them before the ack; reports `degraded` and leaves them to CDC when the predicate is too large |
 
 ### Consistency levels
 

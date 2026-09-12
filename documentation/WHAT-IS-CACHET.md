@@ -130,6 +130,14 @@ collapses the hit rate to near zero on any shard taking writes. Watermarking on 
 what makes read-own-writes affordable — and it works so well that read-own-writes held in Phase 1
 with *no invalidation at all*.
 
+The guarantee is carried by a **token held by the client**, not by the server. That is what lets it
+survive a reconnect, an engine failover, and a hop into another service — and it is why the Go SDK
+carries the token for you rather than leaving it as something to remember.
+
+Every level, and every *non*-guarantee, is executed as a cell of a conformance matrix. The suite also
+runs the invalidation-dependent cells against a deliberately naive cache and **requires them to
+fail**, because a consistency test that has never failed is proving nothing.
+
 ### 3 · Leases — origin load bounded by construction *(planned, Phase 4a)*
 
 On a miss, exactly one caller gets a token to fill that key. Concurrent callers wait briefly, then

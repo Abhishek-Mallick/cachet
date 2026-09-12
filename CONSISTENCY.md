@@ -175,9 +175,12 @@ Two orderings carry the whole guarantee, and both are testable:
 - **`W[s] = max(W[s], fv)` on read.** Observing advances the watermark, which is what gives monotonic
   reads without any extra state.
 
-**Tests:** `conformance/session_test.go` — `TestReadOwnWrite`, `TestReadOwnInsertOverNegative`,
-`TestReadOwnDelete`, `TestMonotonicReadsUnderConcurrentWriters`,
-`TestWatermarkPropagatesAcrossServiceHop`, `TestSessionSurvivesEngineFailover`.
+**Tests:** read-own-write, read-own-insert, read-own-delete and monotonic reads are executed as cells
+of the matrix in `test/conformance/matrix_test.go`, at **every** level rather than only at `SESSION`.
+`test/conformance/session_test.go` covers what the matrix cannot reach — the token's lifetime rather
+than a single read: `TestWatermarkPropagatesAcrossServiceHop`, `TestReconnectKeepsTheGuarantee`,
+`TestARecreatedClientStartsANewSession`, `TestObservingAdvancesTheWatermark`, and
+`TestACachedReadReturnsTheSameRecordAsAnUncachedOne`.
 
 ---
 
@@ -292,6 +295,18 @@ engine resolves them exactly with `SELECT pk ... FOR UPDATE` inside the transact
 predicate matches more than `max_affected_keys` rows (default 1000), that resolution is abandoned as
 too expensive and the write relies on CDC invalidation instead.
 
+> **The budget is per shard, not per statement.** A conditional write runs one transaction on each
+> shard, and the cost being capped — holding a transaction open across row locks — is a
+> per-transaction cost. A global budget would be arbitrary: on a hundred shards it would let each
+> resolve only ten rows, which is needlessly conservative about a limit that exists to protect a
+> resource each shard holds separately. A write degrades if ANY shard exceeds its budget, and the
+> affected-key list is then empty for the whole write rather than partial.
+
+**Resolving inside the transaction is load-bearing, not an optimisation.** Resolving before it would
+leave a window in which a row joins or leaves the predicate between the `SELECT` and the `UPDATE`.
+The write would touch a row nobody invalidated, and the resulting staleness would present as a cache
+bug for as long as anyone cared to investigate it.
+
 When that happens the response carries:
 
 ```
@@ -313,8 +328,9 @@ The SDK surfaces `degraded` as a field on the result. **Ignoring it is a caller 
 be a visible one** — a silent downgrade of a stated guarantee is exactly the failure this project
 exists to eliminate.
 
-**Tests:** `conformance/degraded_test.go` — `TestLargePredicateDegradesOthersNotSelf`,
-`TestDegradedFlagIsSurfacedToCaller`, `TestDegradedConvergesWithinCDCLagBound`.
+**Tests:** `test/conformance/degraded_test.go` — `TestLargePredicateDegradesOthersNotSelf`,
+`TestDegradedFlagIsSurfacedToCaller`, `TestDegradedConvergesWithinCDCLagBound`,
+`TestDegradedWriteStillCommits`, `TestASmallPredicateInvalidatesExactly`.
 
 ---
 
@@ -367,8 +383,15 @@ blended number would hide exactly the trade the levels exist to expose.
 
 ## 8. The conformance matrix
 
-`test/conformance/matrix_test.go` generates this cross product. Every cell is executed; every cell
-either asserts a guarantee or asserts its documented absence.
+`test/conformance/matrix_test.go` generates this cross product. Every cell is executed. A ✅ is
+asserted; a ⬜ is executed and its outcome **recorded** rather than asserted, because asserting it
+would either invent a promise the model does not make or forbid the system from being incidentally
+better than its contract. A ❌ is asserted to be absent.
+
+Two observations worth carrying out of the recorded cells: with synchronous invalidation on, "read
+another session's write, immediately" holds at every level even though `SESSION` does not promise it;
+and "staleness bounded by t" is observed **not** holding at `SESSION` and `EVENTUAL`, so that
+non-guarantee is real rather than theoretical.
 
 | Operation | `STRONG` | `SESSION` | `BOUNDED(t)` | `EVENTUAL` |
 |---|---|---|---|---|
@@ -383,6 +406,7 @@ either asserts a guarantee or asserts its documented absence.
 | Survives engine failover | ✅ | ✅ | ✅ | ✅ |
 | Survives Redis flush | ✅ | ✅ | ✅ | ✅ |
 | Survives CDC restart mid-stream | ✅ | ✅ | ✅ | ✅ |
+| Cached read equals uncached read | ✅ | ✅ | ✅ | ✅ |
 | Cross-key snapshot | ❌ | ❌ | ❌ | ❌ |
 
 ✅ guaranteed and tested · ⬜ explicitly not guaranteed, and tested to confirm the model is honest

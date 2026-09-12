@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <sub><strong>⚠️ Under active development.</strong> Phases 0–2 complete, Phase 3 next.
+  <sub><strong>⚠️ Under active development.</strong> Phases 0–3 complete, Phase 4 next.
   Not production software. <a href="#status">See what works today →</a></sub>
 </p>
 
@@ -155,14 +155,14 @@ the benchmarks more interesting.
 
 ## Status
 
-**Currently: Phase 2 complete. Phase 3 next.**
+**Currently: Phase 3 complete. Phase 4 next.**
 
 | Phase | | What it delivers |
 |---|---|---|
 | **0 · Foundation** | ✅ | Sharded MyRocks stack, consistent-hash ring, HLC versioning, gRPC API over TCP **and** Unix sockets, RED metrics + Grafana, open-loop Zipfian harness, uncached baseline |
 | **1 · Naive TTL cache** | ✅ | Cache-aside with TTL only. Staleness knowingly bad, and asserted as a test |
 | **2 · Exact invalidation** | ✅ | CDC tailer + checkpointing, versioned CAS, negative caching, independent cache ring, proportional circuit breaker, `cachetctl` |
-| **3 · Consistency model** | ⬜ | Affected-key extraction, session tokens, 4 levels, conformance suite, Go SDK with OTel watermark propagation |
+| **3 · Consistency model** | ✅ | Affected-key extraction, session tokens, 4 levels, conformance suite, Go SDK with OTel watermark propagation |
 | **4 · Leases · adaptive admission · Sextant** | ⬜ | The stampede graph, per-key r:w admission, continuous verification |
 | **5 · Proof** | ⬜ | 9 injected faults, each caught *and explained* |
 | **6 · Publish** | ⬜ | Writeup + the MyRocks-vs-InnoDB cache-value study |
@@ -179,10 +179,12 @@ the benchmarks more interesting.
 | Negative caching with read-own-inserts | ✅ Working |
 | Independent cache ring — routed separately from database shards | ✅ Working |
 | Proportional circuit breaker — sheds a fraction, never all | ✅ Working |
-| `pkg/cachet` Go SDK · consistency conformance suite | ⬜ Phase 3 |
+| `pkg/cachet` Go SDK — carries the session, propagates it via OTel baggage | ✅ Working |
+| Consistency conformance suite — 10 operations × 4 levels | ✅ Working |
+| Conditional writes with exact affected-key extraction | ✅ Working |
 | Leases · adaptive admission · Sextant | ⬜ Phase 4 |
 
-### Three results worth knowing about
+### Four results worth knowing about
 
 **Read-own-writes held in Phase 1 with no invalidation at all.** Writes never touched the cache, yet
 a session carrying its token could not be served a stale entry — because the watermark check rejects
@@ -194,6 +196,13 @@ existed.
 production 4-hour TTL it reached 93.9% and 46 origin QPS; exact invalidation gives some of that back
 (89.7%, 78 QPS). Two of the TTL-only runs hit 100% with zero origin load. It is "perfect" precisely
 to the extent that it is wrong. Publishing that trade is the point.
+
+**The conformance suite found a real bug in its first week.** The cache entry carried the payload but
+not `tenant_id` or `status` — a Phase 1 decision that was correct until conditional writes made
+`status` meaningful. From then on, the same key returned a *different record* depending on whether
+the cache happened to be warm: the database said `2`, the cache said `0`, and nothing anywhere
+reported a problem. A cache whose hits and misses disagree makes every guarantee above it conditional
+on state no caller can see. That is now a conformance cell of its own.
 
 **Shedding a read costs hit rate; shedding an invalidation costs correctness.** The circuit breaker
 gates reads and fills but never tombstones. A shed read is served from the database and nobody is
