@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -207,7 +209,7 @@ func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
 	if len(res) == 0 {
 		return Entry{}, false, nil
 	}
-	if len(res) != 4 {
+	if len(res) != 6 {
 		return Entry{}, false, fmt.Errorf("cache: get %s: %w: %d fields", key, ErrCorruptEntry, len(res))
 	}
 
@@ -249,6 +251,8 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 		e.Payload,
 		negative,
 		c.ttl.Milliseconds(),
+		e.TenantID,
+		e.Status,
 	).Int64()
 	if err != nil {
 		b.Failure()
@@ -318,7 +322,71 @@ func entryFromLua(res []any) (Entry, error) {
 		negative = n == "1"
 	}
 
-	return Entry{RowVersion: rv, FillVersion: fv, Payload: payload, Negative: negative}, nil
+	// The row fields are optional on read: an entry written by an older build carries neither, and
+	// reading it as a zero-valued row is better than failing the request. It reads as a slightly
+	// wrong record exactly once, until the TTL or the next write replaces it.
+	tenantID, err := decodeTenantID(res[4])
+	if err != nil {
+		return Entry{}, err
+	}
+	status, err := decodeStatus(res[5])
+	if err != nil {
+		return Entry{}, err
+	}
+
+	return Entry{
+		RowVersion:  rv,
+		FillVersion: fv,
+		TenantID:    tenantID,
+		Status:      status,
+		Payload:     payload,
+		Negative:    negative,
+	}, nil
+}
+
+// decodeTenantID and decodeStatus narrow the entry's row fields.
+//
+// The range check after parsing is redundant with the bit width handed to ParseUint, and it is kept
+// because it makes the invariant local: a reader — and the overflow linter — can see that the
+// conversion cannot wrap without having to reason about an argument three lines up.
+func decodeTenantID(raw any) (uint32, error) {
+	v, err := decodeSmall(raw, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%w: tenant id: %w", ErrCorruptEntry, err)
+	}
+	if v > math.MaxUint32 {
+		return 0, fmt.Errorf("%w: tenant id %d does not fit in a uint32", ErrCorruptEntry, v)
+	}
+	return uint32(v), nil
+}
+
+func decodeStatus(raw any) (uint8, error) {
+	v, err := decodeSmall(raw, 8)
+	if err != nil {
+		return 0, fmt.Errorf("%w: status: %w", ErrCorruptEntry, err)
+	}
+	if v > math.MaxUint8 {
+		return 0, fmt.Errorf("%w: status %d does not fit in a uint8", ErrCorruptEntry, v)
+	}
+	return uint8(v), nil
+}
+
+// decodeSmall parses one of the entry's narrow numeric fields.
+//
+// A missing field decodes as zero rather than as an error, so an entry written before these fields
+// existed still reads. A field that is PRESENT but unparseable is an error, because that means
+// something other than Cachet is writing to these keys — which is worth surfacing rather than
+// rounding to zero.
+func decodeSmall(raw any, bits int) (uint64, error) {
+	s, ok := raw.(string)
+	if !ok || s == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseUint(s, 10, bits)
+	if err != nil {
+		return 0, fmt.Errorf("bad value %q", s)
+	}
+	return v, nil
 }
 
 // Flush removes every entry.

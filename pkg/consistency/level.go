@@ -15,6 +15,18 @@ import (
 	"time"
 )
 
+// DefaultMaxAffectedKeys is where a conditional write stops resolving affected keys exactly.
+//
+// 1000 is a budget, not a limit on correctness: past it the write still commits and still
+// invalidates, just through CDC rather than before the ack. Resolving a million keys exactly would
+// hold a transaction open across a million row locks, which is a worse outage than the bounded
+// staleness it prevents (CONSISTENCY.md §5).
+const DefaultMaxAffectedKeys = 1000
+
+// DefaultCDCLagBound is the staleness other sessions are promised for the keys a degraded write left
+// to the tailer.
+const DefaultCDCLagBound = 5 * time.Second
+
 // Level is a per-request consistency guarantee.
 type Level int
 

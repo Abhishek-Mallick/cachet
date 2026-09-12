@@ -888,6 +888,159 @@ func (x *DeleteResponse) GetSession() *SessionToken {
 	return nil
 }
 
+// UpdateWhereRequest is a conditional write: change every row matching a predicate.
+//
+// The predicate is a typed struct, not a SQL fragment, and that is the point. Accepting arbitrary
+// SQL would make Cachet a query proxy, and a proxy cannot resolve affected keys — it can only infer
+// them from the text, which is the exact limitation the integrated model exists to escape
+// (product spec §4). A narrow predicate is why the affected-key list can be EXACT.
+type UpdateWhereRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The predicate: rows in this tenant currently holding match_status.
+	TenantId    uint32 `protobuf:"varint,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	MatchStatus uint32 `protobuf:"varint,2,opt,name=match_status,json=matchStatus,proto3" json:"match_status,omitempty"`
+	// The change applied to every matched row.
+	SetStatus     uint32        `protobuf:"varint,3,opt,name=set_status,json=setStatus,proto3" json:"set_status,omitempty"`
+	Session       *SessionToken `protobuf:"bytes,4,opt,name=session,proto3" json:"session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateWhereRequest) Reset() {
+	*x = UpdateWhereRequest{}
+	mi := &file_cachet_v1_cachet_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateWhereRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateWhereRequest) ProtoMessage() {}
+
+func (x *UpdateWhereRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cachet_v1_cachet_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateWhereRequest.ProtoReflect.Descriptor instead.
+func (*UpdateWhereRequest) Descriptor() ([]byte, []int) {
+	return file_cachet_v1_cachet_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *UpdateWhereRequest) GetTenantId() uint32 {
+	if x != nil {
+		return x.TenantId
+	}
+	return 0
+}
+
+func (x *UpdateWhereRequest) GetMatchStatus() uint32 {
+	if x != nil {
+		return x.MatchStatus
+	}
+	return 0
+}
+
+func (x *UpdateWhereRequest) GetSetStatus() uint32 {
+	if x != nil {
+		return x.SetStatus
+	}
+	return 0
+}
+
+func (x *UpdateWhereRequest) GetSession() *SessionToken {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
+type UpdateWhereResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Matched is how many rows the predicate hit — the blast radius, reported whether or not the keys
+	// were resolved exactly.
+	Matched uint64 `protobuf:"varint,1,opt,name=matched,proto3" json:"matched,omitempty"`
+	// AffectedKeys is the exact set of rows touched. It is EMPTY when meta.degraded is true, never
+	// partial: a partial list is worse than none, because the caller would invalidate what it was
+	// given with no way to know which rows were silently left to CDC.
+	AffectedKeys []string `protobuf:"bytes,2,rep,name=affected_keys,json=affectedKeys,proto3" json:"affected_keys,omitempty"`
+	// meta.version is the HIGHEST version any shard stamped, and is informational only: a conditional
+	// write touches several shards, and versions from different shards are incomparable (ADR 0003).
+	// The session token below is authoritative — it carries one watermark per shard, which is the
+	// only shape that describes this write correctly.
+	Meta          *WriteMeta    `protobuf:"bytes,3,opt,name=meta,proto3" json:"meta,omitempty"`
+	Session       *SessionToken `protobuf:"bytes,4,opt,name=session,proto3" json:"session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateWhereResponse) Reset() {
+	*x = UpdateWhereResponse{}
+	mi := &file_cachet_v1_cachet_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateWhereResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateWhereResponse) ProtoMessage() {}
+
+func (x *UpdateWhereResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cachet_v1_cachet_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateWhereResponse.ProtoReflect.Descriptor instead.
+func (*UpdateWhereResponse) Descriptor() ([]byte, []int) {
+	return file_cachet_v1_cachet_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *UpdateWhereResponse) GetMatched() uint64 {
+	if x != nil {
+		return x.Matched
+	}
+	return 0
+}
+
+func (x *UpdateWhereResponse) GetAffectedKeys() []string {
+	if x != nil {
+		return x.AffectedKeys
+	}
+	return nil
+}
+
+func (x *UpdateWhereResponse) GetMeta() *WriteMeta {
+	if x != nil {
+		return x.Meta
+	}
+	return nil
+}
+
+func (x *UpdateWhereResponse) GetSession() *SessionToken {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
 type HandshakeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The protocol version the client was built against, e.g. "cachet.v1".
@@ -899,7 +1052,7 @@ type HandshakeRequest struct {
 
 func (x *HandshakeRequest) Reset() {
 	*x = HandshakeRequest{}
-	mi := &file_cachet_v1_cachet_proto_msgTypes[12]
+	mi := &file_cachet_v1_cachet_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -911,7 +1064,7 @@ func (x *HandshakeRequest) String() string {
 func (*HandshakeRequest) ProtoMessage() {}
 
 func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cachet_v1_cachet_proto_msgTypes[12]
+	mi := &file_cachet_v1_cachet_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -924,7 +1077,7 @@ func (x *HandshakeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeRequest.ProtoReflect.Descriptor instead.
 func (*HandshakeRequest) Descriptor() ([]byte, []int) {
-	return file_cachet_v1_cachet_proto_rawDescGZIP(), []int{12}
+	return file_cachet_v1_cachet_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *HandshakeRequest) GetProtocolVersion() string {
@@ -958,7 +1111,7 @@ type HandshakeResponse struct {
 
 func (x *HandshakeResponse) Reset() {
 	*x = HandshakeResponse{}
-	mi := &file_cachet_v1_cachet_proto_msgTypes[13]
+	mi := &file_cachet_v1_cachet_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -970,7 +1123,7 @@ func (x *HandshakeResponse) String() string {
 func (*HandshakeResponse) ProtoMessage() {}
 
 func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cachet_v1_cachet_proto_msgTypes[13]
+	mi := &file_cachet_v1_cachet_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -983,7 +1136,7 @@ func (x *HandshakeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandshakeResponse.ProtoReflect.Descriptor instead.
 func (*HandshakeResponse) Descriptor() ([]byte, []int) {
-	return file_cachet_v1_cachet_proto_rawDescGZIP(), []int{13}
+	return file_cachet_v1_cachet_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *HandshakeResponse) GetProtocolVersion() string {
@@ -1089,7 +1242,18 @@ const file_cachet_v1_cachet_proto_rawDesc = "" +
 	"\x0eDeleteResponse\x12\x18\n" +
 	"\aexisted\x18\x01 \x01(\bR\aexisted\x12(\n" +
 	"\x04meta\x18\x02 \x01(\v2\x14.cachet.v1.WriteMetaR\x04meta\x121\n" +
-	"\asession\x18\x03 \x01(\v2\x17.cachet.v1.SessionTokenR\asession\"d\n" +
+	"\asession\x18\x03 \x01(\v2\x17.cachet.v1.SessionTokenR\asession\"\xa6\x01\n" +
+	"\x12UpdateWhereRequest\x12\x1b\n" +
+	"\ttenant_id\x18\x01 \x01(\rR\btenantId\x12!\n" +
+	"\fmatch_status\x18\x02 \x01(\rR\vmatchStatus\x12\x1d\n" +
+	"\n" +
+	"set_status\x18\x03 \x01(\rR\tsetStatus\x121\n" +
+	"\asession\x18\x04 \x01(\v2\x17.cachet.v1.SessionTokenR\asession\"\xb1\x01\n" +
+	"\x13UpdateWhereResponse\x12\x18\n" +
+	"\amatched\x18\x01 \x01(\x04R\amatched\x12#\n" +
+	"\raffected_keys\x18\x02 \x03(\tR\faffectedKeys\x12(\n" +
+	"\x04meta\x18\x03 \x01(\v2\x14.cachet.v1.WriteMetaR\x04meta\x121\n" +
+	"\asession\x18\x04 \x01(\v2\x17.cachet.v1.SessionTokenR\asession\"d\n" +
 	"\x10HandshakeRequest\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12%\n" +
 	"\x0eclient_version\x18\x02 \x01(\tR\rclientVersion\"\x84\x02\n" +
@@ -1106,13 +1270,14 @@ const file_cachet_v1_cachet_proto_rawDesc = "" +
 	"\x18CONSISTENCY_LEVEL_STRONG\x10\x01\x12\x1d\n" +
 	"\x19CONSISTENCY_LEVEL_SESSION\x10\x02\x12\x1d\n" +
 	"\x19CONSISTENCY_LEVEL_BOUNDED\x10\x03\x12\x1e\n" +
-	"\x1aCONSISTENCY_LEVEL_EVENTUAL\x10\x042\xc6\x02\n" +
+	"\x1aCONSISTENCY_LEVEL_EVENTUAL\x10\x042\x94\x03\n" +
 	"\fCacheService\x12F\n" +
 	"\tHandshake\x12\x1b.cachet.v1.HandshakeRequest\x1a\x1c.cachet.v1.HandshakeResponse\x124\n" +
 	"\x03Get\x12\x15.cachet.v1.GetRequest\x1a\x16.cachet.v1.GetResponse\x12C\n" +
 	"\bBatchGet\x12\x1a.cachet.v1.BatchGetRequest\x1a\x1b.cachet.v1.BatchGetResponse\x124\n" +
 	"\x03Put\x12\x15.cachet.v1.PutRequest\x1a\x16.cachet.v1.PutResponse\x12=\n" +
-	"\x06Delete\x12\x18.cachet.v1.DeleteRequest\x1a\x19.cachet.v1.DeleteResponseB;Z9github.com/Abhishek-Mallick/cachet/api/cachet/v1;cachetv1b\x06proto3"
+	"\x06Delete\x12\x18.cachet.v1.DeleteRequest\x1a\x19.cachet.v1.DeleteResponse\x12L\n" +
+	"\vUpdateWhere\x12\x1d.cachet.v1.UpdateWhereRequest\x1a\x1e.cachet.v1.UpdateWhereResponseB;Z9github.com/Abhishek-Mallick/cachet/api/cachet/v1;cachetv1b\x06proto3"
 
 var (
 	file_cachet_v1_cachet_proto_rawDescOnce sync.Once
@@ -1127,7 +1292,7 @@ func file_cachet_v1_cachet_proto_rawDescGZIP() []byte {
 }
 
 var file_cachet_v1_cachet_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_cachet_v1_cachet_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_cachet_v1_cachet_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_cachet_v1_cachet_proto_goTypes = []any{
 	(ConsistencyLevel)(0),       // 0: cachet.v1.ConsistencyLevel
 	(*SessionToken)(nil),        // 1: cachet.v1.SessionToken
@@ -1142,26 +1307,28 @@ var file_cachet_v1_cachet_proto_goTypes = []any{
 	(*PutResponse)(nil),         // 10: cachet.v1.PutResponse
 	(*DeleteRequest)(nil),       // 11: cachet.v1.DeleteRequest
 	(*DeleteResponse)(nil),      // 12: cachet.v1.DeleteResponse
-	(*HandshakeRequest)(nil),    // 13: cachet.v1.HandshakeRequest
-	(*HandshakeResponse)(nil),   // 14: cachet.v1.HandshakeResponse
-	nil,                         // 15: cachet.v1.SessionToken.WatermarksEntry
-	nil,                         // 16: cachet.v1.BatchGetResponse.RecordsEntry
-	(*durationpb.Duration)(nil), // 17: google.protobuf.Duration
+	(*UpdateWhereRequest)(nil),  // 13: cachet.v1.UpdateWhereRequest
+	(*UpdateWhereResponse)(nil), // 14: cachet.v1.UpdateWhereResponse
+	(*HandshakeRequest)(nil),    // 15: cachet.v1.HandshakeRequest
+	(*HandshakeResponse)(nil),   // 16: cachet.v1.HandshakeResponse
+	nil,                         // 17: cachet.v1.SessionToken.WatermarksEntry
+	nil,                         // 18: cachet.v1.BatchGetResponse.RecordsEntry
+	(*durationpb.Duration)(nil), // 19: google.protobuf.Duration
 }
 var file_cachet_v1_cachet_proto_depIdxs = []int32{
-	15, // 0: cachet.v1.SessionToken.watermarks:type_name -> cachet.v1.SessionToken.WatermarksEntry
+	17, // 0: cachet.v1.SessionToken.watermarks:type_name -> cachet.v1.SessionToken.WatermarksEntry
 	0,  // 1: cachet.v1.ReadMeta.level_served:type_name -> cachet.v1.ConsistencyLevel
-	17, // 2: cachet.v1.WriteMeta.effective_staleness_bound:type_name -> google.protobuf.Duration
+	19, // 2: cachet.v1.WriteMeta.effective_staleness_bound:type_name -> google.protobuf.Duration
 	0,  // 3: cachet.v1.GetRequest.level:type_name -> cachet.v1.ConsistencyLevel
-	17, // 4: cachet.v1.GetRequest.staleness_bound:type_name -> google.protobuf.Duration
+	19, // 4: cachet.v1.GetRequest.staleness_bound:type_name -> google.protobuf.Duration
 	1,  // 5: cachet.v1.GetRequest.session:type_name -> cachet.v1.SessionToken
 	2,  // 6: cachet.v1.GetResponse.record:type_name -> cachet.v1.Record
 	3,  // 7: cachet.v1.GetResponse.meta:type_name -> cachet.v1.ReadMeta
 	1,  // 8: cachet.v1.GetResponse.session:type_name -> cachet.v1.SessionToken
 	0,  // 9: cachet.v1.BatchGetRequest.level:type_name -> cachet.v1.ConsistencyLevel
-	17, // 10: cachet.v1.BatchGetRequest.staleness_bound:type_name -> google.protobuf.Duration
+	19, // 10: cachet.v1.BatchGetRequest.staleness_bound:type_name -> google.protobuf.Duration
 	1,  // 11: cachet.v1.BatchGetRequest.session:type_name -> cachet.v1.SessionToken
-	16, // 12: cachet.v1.BatchGetResponse.records:type_name -> cachet.v1.BatchGetResponse.RecordsEntry
+	18, // 12: cachet.v1.BatchGetResponse.records:type_name -> cachet.v1.BatchGetResponse.RecordsEntry
 	3,  // 13: cachet.v1.BatchGetResponse.meta:type_name -> cachet.v1.ReadMeta
 	1,  // 14: cachet.v1.BatchGetResponse.session:type_name -> cachet.v1.SessionToken
 	2,  // 15: cachet.v1.PutRequest.record:type_name -> cachet.v1.Record
@@ -1171,23 +1338,28 @@ var file_cachet_v1_cachet_proto_depIdxs = []int32{
 	1,  // 19: cachet.v1.DeleteRequest.session:type_name -> cachet.v1.SessionToken
 	4,  // 20: cachet.v1.DeleteResponse.meta:type_name -> cachet.v1.WriteMeta
 	1,  // 21: cachet.v1.DeleteResponse.session:type_name -> cachet.v1.SessionToken
-	0,  // 22: cachet.v1.HandshakeResponse.supported_levels:type_name -> cachet.v1.ConsistencyLevel
-	2,  // 23: cachet.v1.BatchGetResponse.RecordsEntry.value:type_name -> cachet.v1.Record
-	13, // 24: cachet.v1.CacheService.Handshake:input_type -> cachet.v1.HandshakeRequest
-	5,  // 25: cachet.v1.CacheService.Get:input_type -> cachet.v1.GetRequest
-	7,  // 26: cachet.v1.CacheService.BatchGet:input_type -> cachet.v1.BatchGetRequest
-	9,  // 27: cachet.v1.CacheService.Put:input_type -> cachet.v1.PutRequest
-	11, // 28: cachet.v1.CacheService.Delete:input_type -> cachet.v1.DeleteRequest
-	14, // 29: cachet.v1.CacheService.Handshake:output_type -> cachet.v1.HandshakeResponse
-	6,  // 30: cachet.v1.CacheService.Get:output_type -> cachet.v1.GetResponse
-	8,  // 31: cachet.v1.CacheService.BatchGet:output_type -> cachet.v1.BatchGetResponse
-	10, // 32: cachet.v1.CacheService.Put:output_type -> cachet.v1.PutResponse
-	12, // 33: cachet.v1.CacheService.Delete:output_type -> cachet.v1.DeleteResponse
-	29, // [29:34] is the sub-list for method output_type
-	24, // [24:29] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	1,  // 22: cachet.v1.UpdateWhereRequest.session:type_name -> cachet.v1.SessionToken
+	4,  // 23: cachet.v1.UpdateWhereResponse.meta:type_name -> cachet.v1.WriteMeta
+	1,  // 24: cachet.v1.UpdateWhereResponse.session:type_name -> cachet.v1.SessionToken
+	0,  // 25: cachet.v1.HandshakeResponse.supported_levels:type_name -> cachet.v1.ConsistencyLevel
+	2,  // 26: cachet.v1.BatchGetResponse.RecordsEntry.value:type_name -> cachet.v1.Record
+	15, // 27: cachet.v1.CacheService.Handshake:input_type -> cachet.v1.HandshakeRequest
+	5,  // 28: cachet.v1.CacheService.Get:input_type -> cachet.v1.GetRequest
+	7,  // 29: cachet.v1.CacheService.BatchGet:input_type -> cachet.v1.BatchGetRequest
+	9,  // 30: cachet.v1.CacheService.Put:input_type -> cachet.v1.PutRequest
+	11, // 31: cachet.v1.CacheService.Delete:input_type -> cachet.v1.DeleteRequest
+	13, // 32: cachet.v1.CacheService.UpdateWhere:input_type -> cachet.v1.UpdateWhereRequest
+	16, // 33: cachet.v1.CacheService.Handshake:output_type -> cachet.v1.HandshakeResponse
+	6,  // 34: cachet.v1.CacheService.Get:output_type -> cachet.v1.GetResponse
+	8,  // 35: cachet.v1.CacheService.BatchGet:output_type -> cachet.v1.BatchGetResponse
+	10, // 36: cachet.v1.CacheService.Put:output_type -> cachet.v1.PutResponse
+	12, // 37: cachet.v1.CacheService.Delete:output_type -> cachet.v1.DeleteResponse
+	14, // 38: cachet.v1.CacheService.UpdateWhere:output_type -> cachet.v1.UpdateWhereResponse
+	33, // [33:39] is the sub-list for method output_type
+	27, // [27:33] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_cachet_v1_cachet_proto_init() }
@@ -1201,7 +1373,7 @@ func file_cachet_v1_cachet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cachet_v1_cachet_proto_rawDesc), len(file_cachet_v1_cachet_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   16,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

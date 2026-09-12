@@ -30,7 +30,19 @@ var ErrCorruptEntry = errors.New("cache: corrupt entry")
 type Entry struct {
 	RowVersion  uint64
 	FillVersion uint64
-	Payload     []byte
+
+	// TenantID and Status are the rest of the row.
+	//
+	// They are cached because a cache hit and a cache miss must return the SAME record. Phase 1
+	// omitted them on the reasoning that nothing read them on the hot path, which was true until
+	// conditional writes made Status meaningful — and then the same key returned a different status
+	// depending on whether the cache happened to be warm. That is a correctness bug wearing a
+	// performance costume, and it is the class of failure this project exists to eliminate, so the
+	// entry carries the whole row rather than the part that was convenient.
+	TenantID uint32
+	Status   uint8
+
+	Payload []byte
 
 	// Negative marks "this row does not exist", which is a cacheable fact rather than an absence of
 	// one. Without it every lookup of a missing row is a database query, and a workload that probes

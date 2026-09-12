@@ -153,6 +153,41 @@ message DeleteResponse {
   SessionToken session = 3;
 }
 
+// UpdateWhereRequest is a conditional write: change every row matching a predicate.
+//
+// The predicate is a typed struct, not a SQL fragment, and that is the point. Accepting arbitrary
+// SQL would make Cachet a query proxy, and a proxy cannot resolve affected keys — it can only infer
+// them from the text, which is the exact limitation the integrated model exists to escape
+// (product spec §4). A narrow predicate is why the affected-key list can be EXACT.
+message UpdateWhereRequest {
+  // The predicate: rows in this tenant currently holding match_status.
+  uint32 tenant_id = 1;
+  uint32 match_status = 2;
+
+  // The change applied to every matched row.
+  uint32 set_status = 3;
+
+  SessionToken session = 4;
+}
+
+message UpdateWhereResponse {
+  // Matched is how many rows the predicate hit — the blast radius, reported whether or not the keys
+  // were resolved exactly.
+  uint64 matched = 1;
+
+  // AffectedKeys is the exact set of rows touched. It is EMPTY when meta.degraded is true, never
+  // partial: a partial list is worse than none, because the caller would invalidate what it was
+  // given with no way to know which rows were silently left to CDC.
+  repeated string affected_keys = 2;
+
+  // meta.version is the HIGHEST version any shard stamped, and is informational only: a conditional
+  // write touches several shards, and versions from different shards are incomparable (ADR 0003).
+  // The session token below is authoritative — it carries one watermark per shard, which is the
+  // only shape that describes this write correctly.
+  WriteMeta meta = 3;
+  SessionToken session = 4;
+}
+
 message HandshakeRequest {
   // The protocol version the client was built against, e.g. "cachet.v1".
   string protocol_version = 1;
@@ -182,4 +217,9 @@ service CacheService {
   rpc BatchGet(BatchGetRequest) returns (BatchGetResponse);
   rpc Put(PutRequest) returns (PutResponse);
   rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // UpdateWhere applies a conditional write and invalidates exactly the rows it touched — or
+  // reports degraded and leaves them to CDC when the predicate is too large to resolve
+  // (CONSISTENCY.md §5).
+  rpc UpdateWhere(UpdateWhereRequest) returns (UpdateWhereResponse);
 }

@@ -54,6 +54,17 @@ type Options struct {
 	// MaxSessionShards caps the size of a session token.
 	MaxSessionShards int
 
+	// MaxAffectedKeys is where a conditional write stops resolving affected keys exactly and falls
+	// back to CDC invalidation, reporting degraded=true. It is a guarantee setting: raising it buys
+	// exactness at the cost of holding a transaction open across more row locks, and lowering it
+	// trades staleness for write latency (CONSISTENCY.md §5).
+	MaxAffectedKeys int
+
+	// CDCLagBound is the staleness bound a degraded write promises other sessions until the tailer
+	// catches up. It is reported to the caller as effective_staleness_bound, so a caller can decide
+	// what to do about the weakening instead of discovering it later.
+	CDCLagBound time.Duration
+
 	// MaxClockSkew bounds the disagreement between engine and shard clocks. It shortens the
 	// BOUNDED(t) window so the engine stays conservative about its own clock.
 	MaxClockSkew time.Duration
@@ -88,6 +99,8 @@ type Engine struct {
 	shards           map[storage.ShardID]*storage.Shard
 	cache            Cache
 	maxSessionShards int
+	maxAffectedKeys  int
+	cdcLagBound      time.Duration
 	maxClockSkew     time.Duration
 	syncInvalidation bool
 	now              func() time.Time
@@ -116,6 +129,18 @@ func New(opts Options) (*Engine, error) {
 		return nil, errors.New("engine: shard connections do not match the routing topology")
 	}
 
+	maxAffected := opts.MaxAffectedKeys
+	if maxAffected <= 0 {
+		// A zero budget would degrade every conditional write, silently turning exact invalidation
+		// off across the whole system. Defaulting is right for a test that does not care; accepting
+		// an explicit zero would not be.
+		maxAffected = consistency.DefaultMaxAffectedKeys
+	}
+	cdcLag := opts.CDCLagBound
+	if cdcLag <= 0 {
+		cdcLag = consistency.DefaultCDCLagBound
+	}
+
 	maxShards := opts.MaxSessionShards
 	if maxShards <= 0 {
 		maxShards = consistency.DefaultMaxSessionShards
@@ -135,6 +160,8 @@ func New(opts Options) (*Engine, error) {
 		shards:           opts.Shards,
 		cache:            opts.Cache,
 		maxSessionShards: maxShards,
+		maxAffectedKeys:  maxAffected,
+		cdcLagBound:      cdcLag,
 		maxClockSkew:     opts.MaxClockSkew,
 		syncInvalidation: opts.SynchronousInvalidation,
 		now:              nowFn,
@@ -293,6 +320,8 @@ func (e *Engine) fill(ctx context.Context, key string, rec storage.Record, fillV
 	entry := cache.Entry{
 		RowVersion:  uint64(rec.Version),
 		FillVersion: uint64(fillVersion),
+		TenantID:    rec.TenantID,
+		Status:      rec.Status,
 		Payload:     rec.Payload,
 	}
 	e.applyFill(ctx, key, entry)
@@ -551,14 +580,20 @@ func cacheHitMeta(level consistency.Level, entry cache.Entry) *cachetv1.ReadMeta
 	}
 }
 
+// entryToProto renders a cached entry as the record a caller sees.
+//
+// It must produce the SAME record recordToProto would produce for an uncached read of the same row.
+// Phase 1 omitted tenant_id and status here, reasoning that nothing read them on the hot path —
+// true until conditional writes made status meaningful, at which point the same key returned a
+// different status depending on whether the cache happened to be warm. The conformance suite caught
+// it; TestACachedReadReturnsTheSameRecordAsAnUncachedOne keeps it caught.
 func entryToProto(id uint64, entry cache.Entry) *cachetv1.Record {
-	// tenant_id and status are not cached in Phase 1: nothing reads them on the hot path, and
-	// widening the entry costs memory on every key to serve a field no caller uses. When a caller
-	// needs them, they join the entry encoding with a version bump rather than being smuggled in.
 	return &cachetv1.Record{
-		Id:      id,
-		Payload: entry.Payload,
-		Version: entry.RowVersion,
+		Id:       id,
+		TenantId: entry.TenantID,
+		Status:   uint32(entry.Status),
+		Payload:  entry.Payload,
+		Version:  entry.RowVersion,
 	}
 }
 

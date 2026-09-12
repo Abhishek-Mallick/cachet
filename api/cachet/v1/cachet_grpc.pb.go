@@ -28,11 +28,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	CacheService_Handshake_FullMethodName = "/cachet.v1.CacheService/Handshake"
-	CacheService_Get_FullMethodName       = "/cachet.v1.CacheService/Get"
-	CacheService_BatchGet_FullMethodName  = "/cachet.v1.CacheService/BatchGet"
-	CacheService_Put_FullMethodName       = "/cachet.v1.CacheService/Put"
-	CacheService_Delete_FullMethodName    = "/cachet.v1.CacheService/Delete"
+	CacheService_Handshake_FullMethodName   = "/cachet.v1.CacheService/Handshake"
+	CacheService_Get_FullMethodName         = "/cachet.v1.CacheService/Get"
+	CacheService_BatchGet_FullMethodName    = "/cachet.v1.CacheService/BatchGet"
+	CacheService_Put_FullMethodName         = "/cachet.v1.CacheService/Put"
+	CacheService_Delete_FullMethodName      = "/cachet.v1.CacheService/Delete"
+	CacheService_UpdateWhere_FullMethodName = "/cachet.v1.CacheService/UpdateWhere"
 )
 
 // CacheServiceClient is the client API for CacheService service.
@@ -47,6 +48,10 @@ type CacheServiceClient interface {
 	BatchGet(ctx context.Context, in *BatchGetRequest, opts ...grpc.CallOption) (*BatchGetResponse, error)
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*PutResponse, error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// UpdateWhere applies a conditional write and invalidates exactly the rows it touched — or
+	// reports degraded and leaves them to CDC when the predicate is too large to resolve
+	// (CONSISTENCY.md §5).
+	UpdateWhere(ctx context.Context, in *UpdateWhereRequest, opts ...grpc.CallOption) (*UpdateWhereResponse, error)
 }
 
 type cacheServiceClient struct {
@@ -107,6 +112,16 @@ func (c *cacheServiceClient) Delete(ctx context.Context, in *DeleteRequest, opts
 	return out, nil
 }
 
+func (c *cacheServiceClient) UpdateWhere(ctx context.Context, in *UpdateWhereRequest, opts ...grpc.CallOption) (*UpdateWhereResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateWhereResponse)
+	err := c.cc.Invoke(ctx, CacheService_UpdateWhere_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CacheServiceServer is the server API for CacheService service.
 // All implementations must embed UnimplementedCacheServiceServer
 // for forward compatibility.
@@ -119,6 +134,10 @@ type CacheServiceServer interface {
 	BatchGet(context.Context, *BatchGetRequest) (*BatchGetResponse, error)
 	Put(context.Context, *PutRequest) (*PutResponse, error)
 	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
+	// UpdateWhere applies a conditional write and invalidates exactly the rows it touched — or
+	// reports degraded and leaves them to CDC when the predicate is too large to resolve
+	// (CONSISTENCY.md §5).
+	UpdateWhere(context.Context, *UpdateWhereRequest) (*UpdateWhereResponse, error)
 	mustEmbedUnimplementedCacheServiceServer()
 }
 
@@ -143,6 +162,9 @@ func (UnimplementedCacheServiceServer) Put(context.Context, *PutRequest) (*PutRe
 }
 func (UnimplementedCacheServiceServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedCacheServiceServer) UpdateWhere(context.Context, *UpdateWhereRequest) (*UpdateWhereResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateWhere not implemented")
 }
 func (UnimplementedCacheServiceServer) mustEmbedUnimplementedCacheServiceServer() {}
 func (UnimplementedCacheServiceServer) testEmbeddedByValue()                      {}
@@ -255,6 +277,24 @@ func _CacheService_Delete_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CacheService_UpdateWhere_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateWhereRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CacheServiceServer).UpdateWhere(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CacheService_UpdateWhere_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CacheServiceServer).UpdateWhere(ctx, req.(*UpdateWhereRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CacheService_ServiceDesc is the grpc.ServiceDesc for CacheService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -281,6 +321,10 @@ var CacheService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Delete",
 			Handler:    _CacheService_Delete_Handler,
+		},
+		{
+			MethodName: "UpdateWhere",
+			Handler:    _CacheService_UpdateWhere_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

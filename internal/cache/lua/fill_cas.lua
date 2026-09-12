@@ -6,6 +6,12 @@
 -- ARGV[3] = payload
 -- ARGV[4] = "1" for a negative entry ("this row does not exist"), "0" otherwise
 -- ARGV[5] = TTL in milliseconds
+-- ARGV[6] = tenant id  (decimal string)
+-- ARGV[7] = status     (decimal string)
+--
+-- The row fields are stored so a cache hit returns the SAME record as a cache miss. They are plain
+-- decimal rather than the padded form used for versions: they are never compared, only carried, so
+-- the ordering property the padding exists for does not apply to them.
 --
 -- Returns 1 if the fill was applied, 0 if it lost the compare-and-set.
 --
@@ -39,6 +45,6 @@ if rv then
   end
 end
 
-redis.call('HSET', KEYS[1], 'v', ARGV[1], 'f', ARGV[2], 'p', ARGV[3], 'n', ARGV[4])
+redis.call('HSET', KEYS[1], 'v', ARGV[1], 'f', ARGV[2], 'p', ARGV[3], 'n', ARGV[4], 'd', ARGV[6], 's', ARGV[7])
 redis.call('PEXPIRE', KEYS[1], ARGV[5])
 return 1

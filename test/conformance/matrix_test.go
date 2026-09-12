@@ -223,6 +223,10 @@ func TestTheSuiteDetectsAViolation(t *testing.T) {
 
 type config struct {
 	synchronousInvalidation bool
+
+	// maxAffectedKeys is the conditional-write budget. Set low by the degraded tests so degradation
+	// can be observed without writing a thousand rows to provoke it.
+	maxAffectedKeys int
 }
 
 type env struct {
@@ -241,6 +245,7 @@ func newEnv(t *testing.T, cfg config) *env {
 	cluster := harness.StartCachedWith(ctx, t, harness.CacheOptions{
 		TTL:                     time.Hour,
 		SynchronousInvalidation: cfg.synchronousInvalidation,
+		MaxAffectedKeys:         cfg.maxAffectedKeys,
 	}, "tcp://127.0.0.1:0")
 
 	return &env{

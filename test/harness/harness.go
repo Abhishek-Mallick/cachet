@@ -58,7 +58,7 @@ func (c *Cluster) Stop() { c.stop() }
 // (test/README.md).
 func Start(ctx context.Context, t *testing.T, listen ...string) *Cluster {
 	t.Helper()
-	return start(ctx, t, nil, false, listen...)
+	return start(ctx, t, nil, CacheOptions{}, listen...)
 }
 
 // CacheOptions configures a cached cluster.
@@ -69,6 +69,11 @@ type CacheOptions struct {
 	// test prove that a guarantee holds on the session watermark ALONE, with no invalidation
 	// helping — which is the only way to know which mechanism is actually carrying it.
 	SynchronousInvalidation bool
+
+	// MaxAffectedKeys is the conditional-write budget past which exact key resolution is abandoned.
+	// Zero takes the default; a conformance test that wants to observe degradation sets it low
+	// rather than writing a thousand rows to provoke it.
+	MaxAffectedKeys int
 
 	// PreserveCache keeps whatever the cache already holds instead of flushing it at startup.
 	//
@@ -115,12 +120,12 @@ func StartCachedWith(ctx context.Context, t *testing.T, opts CacheOptions, liste
 		}
 	}
 
-	cluster := start(ctx, t, c, opts.SynchronousInvalidation, listen...)
+	cluster := start(ctx, t, c, opts, listen...)
 	cluster.Cache = c
 	return cluster
 }
 
-func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, syncInvalidation bool, listen ...string) *Cluster {
+func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts CacheOptions, listen ...string) *Cluster {
 	t.Helper()
 
 	EnsureEnvironment(ctx, t)
@@ -148,8 +153,9 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, syncInva
 		Shards:                  shards,
 		Cache:                   cacheClient,
 		MaxSessionShards:        64,
+		MaxAffectedKeys:         opts.MaxAffectedKeys,
 		MaxClockSkew:            250 * time.Millisecond,
-		SynchronousInvalidation: syncInvalidation,
+		SynchronousInvalidation: opts.SynchronousInvalidation,
 		Version:                 "test",
 	})
 	if err != nil {

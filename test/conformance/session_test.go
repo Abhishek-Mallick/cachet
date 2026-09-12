@@ -227,3 +227,52 @@ func warm(t *testing.T, e *env, key string) {
 		t.Fatalf("%s is not cached after two reads; a test relying on a stale entry would prove nothing", key)
 	}
 }
+
+// TestACachedReadReturnsTheSameRecordAsAnUncachedOne is the invariant behind every other test here.
+//
+// Cachet is a cache. If a hit and a miss can return different records, then every guarantee above is
+// conditional on cache state that no caller can see — and the model stops being a contract.
+//
+// It exists because the conformance suite caught this for real: the entry encoding carried the
+// payload but not tenant_id or status, so a conditional write that changed status was invisible on
+// any cache hit. The database said 2, the cache said 0, and nothing anywhere reported a problem.
+func TestACachedReadReturnsTheSameRecordAsAnUncachedOne(t *testing.T) {
+	e := newEnv(t, config{synchronousInvalidation: true})
+	key := e.key()
+
+	if _, err := e.client.Put(context.Background(), &cachetv1.PutRequest{
+		Key:    key,
+		Record: &cachetv1.Record{TenantId: 4242, Status: 7, Payload: []byte("body")},
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// STRONG bypasses the cache, so this is the row as the database holds it.
+	uncached := get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_STRONG}, nil)
+	if uncached.GetMeta().GetCacheHit() {
+		t.Fatal("the STRONG read was served from the cache; it cannot be the uncached reference")
+	}
+
+	warm(t, e, key)
+	cached := get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	if !cached.GetMeta().GetCacheHit() {
+		t.Fatal("the second read was not a cache hit; there is nothing to compare")
+	}
+
+	u, c := uncached.GetRecord(), cached.GetRecord()
+	if c.GetId() != u.GetId() {
+		t.Errorf("id: cached %d, uncached %d", c.GetId(), u.GetId())
+	}
+	if c.GetTenantId() != u.GetTenantId() {
+		t.Errorf("tenant_id: cached %d, uncached %d — a cache hit returns a different row", c.GetTenantId(), u.GetTenantId())
+	}
+	if c.GetStatus() != u.GetStatus() {
+		t.Errorf("status: cached %d, uncached %d — a cache hit returns a different row", c.GetStatus(), u.GetStatus())
+	}
+	if string(c.GetPayload()) != string(u.GetPayload()) {
+		t.Errorf("payload: cached %q, uncached %q", c.GetPayload(), u.GetPayload())
+	}
+	if c.GetVersion() != u.GetVersion() {
+		t.Errorf("version: cached %d, uncached %d", c.GetVersion(), u.GetVersion())
+	}
+}

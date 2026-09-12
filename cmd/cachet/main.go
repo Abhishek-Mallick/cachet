@@ -119,6 +119,8 @@ func run() error {
 		Shards:                  shards,
 		Cache:                   cacheClient,
 		MaxSessionShards:        cfg.Consistency.MaxSessionShards,
+		MaxAffectedKeys:         cfg.Consistency.MaxAffectedKeys,
+		CDCLagBound:             cfg.Consistency.CDCLagBound,
 		MaxClockSkew:            cfg.Consistency.MaxClockSkew,
 		SynchronousInvalidation: cfg.Consistency.SynchronousInvalidation,
 		Version:                 version,

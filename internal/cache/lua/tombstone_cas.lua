@@ -29,6 +29,6 @@ end
 -- The payload fields go; the version marker stays. A reader sees no 'v' and treats the entry as a
 -- miss, while a late fill still meets the marker and loses.
 redis.call('HSET', KEYS[1], 't', ARGV[1])
-redis.call('HDEL', KEYS[1], 'v', 'f', 'p', 'n')
+redis.call('HDEL', KEYS[1], 'v', 'f', 'p', 'n', 'd', 's')
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
 return 1
