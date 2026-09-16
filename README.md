@@ -264,9 +264,9 @@ is typed by hand, and the empty rows stay empty until the capability that fills 
 
 ### How to read that table
 
-**The result so far is load, not latency.** Caching cut steady-state database load by **81%**
-(760 → 145 origin QPS), and exact invalidation cut staleness from **10.07 s to 34.98 ms —
-288× better** — while giving back some hit rate as the price of correctness.
+**The result so far is load, not latency.** With exact invalidation, steady-state database load fell
+from **760 to 78 origin QPS — a 90% reduction** — and staleness fell from **10.07 s to 34.98 ms,
+288× better**, while giving back some hit rate as the price of correctness.
 
 **The p99 column is not a result yet, and we say so rather than rounding it into one.** The
 run-to-run spreads swamp every difference (TTL-only ranged 10.35–77.18 ms). When the spread exceeds
