@@ -3,9 +3,8 @@
 > **What Cachet is and why:** [WHAT-IS-CACHET.md](./WHAT-IS-CACHET.md).
 > **Exact guarantees:** [`CONSISTENCY.md`](../CONSISTENCY.md).
 >
-> ⚠️ **Cachet is under active development and is not production software.** Phases 0–3 are
-> complete; Phase 4 is next. This page documents **what runs today** and marks everything else as
-> planned. See [README → Status](../README.md#status).
+> ⚠️ **Cachet is pre-1.0.** This page documents what is available today; capabilities still on the
+> roadmap are marked as such. See [README → Capabilities](../README.md#capabilities).
 
 ---
 
@@ -17,7 +16,7 @@
 | CDC tailer — MySQL binlog → invalidation, durable checkpoints | `flux` | ✅ Working |
 | Benchmark driver — open-loop, Zipfian, staleness probe, report generator | `benchctl` | ✅ Working |
 | Operator CLI — status, ring, inspect, invalidate, checkpoint | `cachetctl` | ✅ Working |
-| Consistency verifier | `sextant` | ⬜ Phase 4c, not started |
+| Consistency verifier | `sextant` | ⬜ Roadmap |
 | Independent cache ring + proportional circuit breaker | (in `cachet`) | ✅ Working |
 | Go SDK — carries the session, propagates it via OTel baggage | `pkg/cachet` | ✅ Working |
 
@@ -348,9 +347,9 @@ Check its progress with `cachetctl checkpoint`. A shard with no checkpoint is re
 make test-unit          # fast, no containers, -race
 make test-integration   # testcontainers: one MySQL + one Redis
 make test-lua           # Lua scripts against a real Redis, under concurrency
-make test-consistency   # the conformance suite — THE gate that matters (Phase 3)
+make test-consistency   # the conformance suite — the gate that matters
 make test-e2e           # end to end, over both TCP and Unix sockets
-make test-chaos         # the 9 injected faults (Phase 5)
+make test-chaos         # the 9 injected faults (roadmap)
 make test-all           # everything, in dependency order
 ```
 
@@ -387,6 +386,9 @@ Or drive `benchctl` directly:
 `--host` is **required** — measuring on Docker Desktop is acceptable; letting a reader assume
 otherwise is not.
 
+`--phase` is an identifier the report generator matches to a row in the README table (`0-baseline`,
+`1-ttl`, `2-cdc`, `3-exact`, `4a-leases`, `4b-admission`), not a free-form label.
+
 ### Workloads
 
 | File | Shape |
@@ -395,8 +397,8 @@ otherwise is not.
 | `bench/workloads/w2.yaml` | **The primary workload.** Zipfian θ=0.99, 95% reads, 10k rows, 2000 rps. Every README row comes from this file |
 | `bench/workloads/w3.yaml` | Hot-key / stampede shape |
 
-The parameters in W2 must stay **constant across phases**. A row you cannot compare to the row above
-it is decoration.
+The parameters in W2 must stay **constant across configurations**. A row you cannot compare to the
+row above it is decoration.
 
 ### Two things the harness gets right, deliberately
 

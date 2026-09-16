@@ -96,9 +96,9 @@ Two paths, deliberately separable so neither gets credit for the other's work:
   made directly to the database by migrations and admin scripts.
 
 Both are versioned compare-and-set, so replaying the binlog is idempotent and a restarted tailer
-cannot undo newer state. That is not an aspiration — it is the Phase 2 exit gate: the tailer is
-killed mid-stream with writes in flight, restarted from its checkpoint, and then deliberately
-rewound so it replays events it has already applied.
+cannot undo newer state. That is not an aspiration — it is a test that runs on every build: the
+tailer is killed mid-stream with writes in flight, restarted from its checkpoint, and then
+deliberately rewound so it replays events it has already applied.
 
 ### 2.5 · A cache ring that is not the database's ring
 
@@ -127,8 +127,8 @@ hit rate. Shedding an invalidation costs correctness.
 The non-obvious design decision: a session watermark is checked against the **fill version** (the
 database state the entry was filled from), not the **row version**. Watermarking on the row version
 collapses the hit rate to near zero on any shard taking writes. Watermarking on the fill version is
-what makes read-own-writes affordable — and it works so well that read-own-writes held in Phase 1
-with *no invalidation at all*.
+what makes read-own-writes affordable — and it works so well that read-own-writes holds with *no
+invalidation at all*, carried entirely by the watermark.
 
 The guarantee is carried by a **token held by the client**, not by the server. That is what lets it
 survive a reconnect, an engine failover, and a hop into another service — and it is why the Go SDK
@@ -138,7 +138,7 @@ Every level, and every *non*-guarantee, is executed as a cell of a conformance m
 runs the invalidation-dependent cells against a deliberately naive cache and **requires them to
 fail**, because a consistency test that has never failed is proving nothing.
 
-### 3 · Leases — origin load bounded by construction *(planned, Phase 4a)*
+### 3 · Leases — origin load bounded by construction *(roadmap)*
 
 On a miss, exactly one caller gets a token to fill that key. Concurrent callers wait briefly, then
 read the filled value. Origin load per key is bounded at ~1 per lease interval **regardless of
@@ -148,7 +148,7 @@ The common alternative — deduplicating concurrent fills — fixes *ordering*: 
 overwrite a newer value. It does nothing for *admission*. Ten thousand simultaneous misses on a hot
 key still all reach the database, which is precisely when you can least afford them.
 
-### 4 · Sextant — continuous consistency verification 🔭 *(planned, Phase 4c)*
+### 4 · Sextant — continuous consistency verification 🔭 *(roadmap)*
 
 A verifier that subscribes to the invalidation stream, shadow-reads every cache replica, and detects
 divergence — with **consistency tracing** that records each mutation, so "why was this stale?" has
@@ -174,8 +174,8 @@ SLO per consistency level**. Not a promise in a document. A live number.
 
 MyRocks is an LSM storage engine: a read may touch several SST levels, so read latency is **higher
 and more variable** than a B-tree's. That makes the cache work harder for its place in the stack —
-the value of a cache hit is greater, and the difference is measurable. Phase 6 publishes the
-**delta in cache value between MyRocks and InnoDB**, which nobody has published.
+the value of a cache hit is greater, and the difference is measurable. The **delta in cache value
+between MyRocks and InnoDB** is a number nobody has published, and Cachet is built to measure it.
 
 ---
 
@@ -186,8 +186,8 @@ standard as the product:
 
 > **When the run-to-run spread exceeds the effect, nothing has been measured.**
 
-Cachet's own read-p99 improvement has been reported as *not measurable* for three phases running,
-because the spreads overlap. That row stays honest in the README rather than being quietly rounded
+Cachet's own read-p99 improvement is reported as *not measurable*, because the run-to-run spreads
+overlap. That row stays honest in the README rather than being quietly rounded
 into a win. A benchmark table where the correct configuration wins every column is a table nobody
 should believe — and Cachet's does not.
 
@@ -203,4 +203,4 @@ See [`docs/cachet-benchmarking.md`](../docs/cachet-benchmarking.md) for the full
 | The exact guarantees, normatively | [`CONSISTENCY.md`](../CONSISTENCY.md) |
 | How every number is produced | [`docs/cachet-benchmarking.md`](../docs/cachet-benchmarking.md) |
 | Why each major decision was made | [`docs/adr/`](../docs/adr/) |
-| What is built and what is next | [README → Status](../README.md#status) |
+| What ships today | [README → Capabilities](../README.md#capabilities) |

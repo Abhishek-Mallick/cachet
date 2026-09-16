@@ -8,18 +8,18 @@
 <p align="center">
   <a href="./documentation/WHAT-IS-CACHET.md"><strong>📖 What is Cachet?</strong></a>
   &nbsp;·&nbsp;
-  <a href="./documentation/USING-CACHET.md"><strong>🚀 Using Cachet</strong></a>
+  <a href="./documentation/USING-CACHET.md"><strong>🚀 Quickstart</strong></a>
   &nbsp;·&nbsp;
   <a href="./CONSISTENCY.md">Consistency model</a>
   &nbsp;·&nbsp;
-  <a href="#benchmarks">Benchmarks</a>
+  <a href="#capabilities">Capabilities</a>
   &nbsp;·&nbsp;
-  <a href="#status">Status</a>
+  <a href="#benchmarks">Benchmarks</a>
 </p>
 
 <p align="center">
-  <sub><strong>⚠️ Under active development.</strong> Phases 0–3 complete, Phase 4 next.
-  Not production software. <a href="#status">See what works today →</a></sub>
+  <sub>Apache 2.0 · Go 1.27 · MySQL/MyRocks + Valkey or Redis<br/>
+  <strong>Pre-1.0.</strong> The <a href="#capabilities">capabilities table</a> marks what ships today.</sub>
 </p>
 
 ---
@@ -69,13 +69,28 @@ Precise invalidation is the foundation. Everything below is what it makes possib
 |---|---|---|---|---|
 | Invalidation | CDC + **exact write-path** | Streaming dataflow | Heuristic | Hand-rolled |
 | Consistency | **Read-own-writes, tiered** | Eventual | Probabilistic | Undefined |
-| **Measured correctness** | ✅ **Live SLO** | ❌ | ❌ | ❌ |
-| Stampede protection | ✅ **Leases** | Partial | ❌ | ❌ |
-| Self-tuning admission | ✅ **Per-key r:w** | ❌ manual | Heuristic | ❌ |
+| **Measured correctness** | **Live SLO** <sub>roadmap</sub> | ❌ | ❌ | ❌ |
+| Stampede protection | **Leases** <sub>roadmap</sub> | Partial | ❌ | ❌ |
+| Self-tuning admission | **Per-key r:w** <sub>roadmap</sub> | ❌ manual | Heuristic | ❌ |
 
 **Every cache on that list asks you to trust it. Cachet is the only one that proves it.**
 
-### 1. Leases — bounded origin load
+### Exact invalidation, on two paths
+
+Cachet invalidates the rows a write actually touched, not the table it might have touched.
+
+- **On the write path**, after commit and before the acknowledgement. By the time your write returns,
+  the stale entry is already gone. A conditional write (`UPDATE … WHERE tenant_id = ?`) resolves its
+  affected rows inside the transaction with `SELECT … FOR UPDATE` and invalidates exactly those.
+- **From the binlog**, as a backstop — and as the only path that catches writes made straight to the
+  database by a migration or an admin script.
+
+Both are versioned compare-and-set operations, so replaying the binlog is idempotent and a restarted
+tailer cannot undo newer state. When a predicate matches more rows than the resolution budget allows,
+Cachet says so in the response rather than silently doing less: the write still commits, the affected
+keys fall back to the binlog path, and the caller is handed the staleness bound that now applies.
+
+### Leases — bounded origin load <sub>`roadmap`</sub>
 
 On a miss, exactly one caller gets a token to fill that key. Concurrent callers wait briefly, then
 read the filled value. Origin load per key is bounded at ~1 per lease interval **regardless of
@@ -85,7 +100,7 @@ Deduplicating concurrent fills — the common approach — fixes *ordering*: a s
 a newer value. It does nothing for *admission*. Ten thousand simultaneous misses on a hot key still
 all reach the database, which is exactly when you can least afford them.
 
-### 2. Adaptive admission — no human decides what to cache
+### Adaptive admission — no human decides what to cache <sub>`roadmap`</sub>
 
 Cachet tracks the observed read:write ratio **per key** with a count-min sketch, and caches only
 what earns it.
@@ -95,7 +110,7 @@ ratios aren't uniform within a table and they drift. A write-churning key in an 
 table is pure cost: every write pays invalidation, every read misses. Cachet finds those keys and
 stops caching them, continuously.
 
-### 3. Sextant — continuous consistency verification 🔭
+### Sextant — continuous consistency verification 🔭 <sub>`roadmap`</sub>
 
 A verifier that subscribes to the invalidation stream, shadow-reads every cache replica, and detects
 divergence — with **consistency tracing** that records each mutation, so "why was this stale?" has
@@ -105,7 +120,7 @@ This is the feature the category is missing. Sampling monitors tell you a violat
 minutes later, without telling you why. Sextant runs continuously and keeps enough state to
 reconstruct the sequence that caused any divergence it finds.
 
-### 4. Consistency as a per-request parameter
+### Consistency as a per-request parameter
 
 | Level | Guarantee | For |
 |---|---|---|
@@ -153,72 +168,89 @@ the benchmarks more interesting.
 - **Not a write cache.** Writes go to the database. Always.
 - **Not a database.** It never becomes the source of truth.
 
-## Status
+## Quickstart
 
-**Currently: Phase 3 complete. Phase 4 next.**
+```bash
+make env-up        # 3 MyRocks shards + Valkey, healthy in ~15s
+make seed          # deterministic fixtures
+make build         # cachet, flux, cachetctl, benchctl -> ./bin
+./bin/cachet -config cachet.yaml
+```
 
-| Phase | | What it delivers |
+Then talk to it from Go:
+
+```go
+c, err := cachet.Dial(ctx, "unix:///var/run/cachet.sock")
+defer c.Close()
+
+_, err = c.Put(ctx, "entities:1", cachet.Record{TenantID: 1, Payload: body})
+
+got, err := c.Get(ctx, "entities:1")               // SESSION: reads your own write
+got, err = c.Get(ctx, "entities:1", cachet.AtLevel(consistency.Strong))
+got, err = c.Get(ctx, "entities:1", cachet.WithinStaleness(2*time.Second))
+```
+
+No token appears anywhere — the client carries your session for you, including across a service
+boundary. `make demo` brings the same stack up with Prometheus and a provisioned Grafana dashboard.
+
+Full walkthrough: **[Quickstart →](./documentation/USING-CACHET.md)**
+
+## Capabilities
+
+Cachet is pre-1.0 and developed in the open. This table is the contract: everything marked
+**Available** is implemented, tested against a real MySQL + Valkey stack, and covered by the
+consistency conformance suite.
+
+| | Capability | |
 |---|---|---|
-| **0 · Foundation** | ✅ | Sharded MyRocks stack, consistent-hash ring, HLC versioning, gRPC API over TCP **and** Unix sockets, RED metrics + Grafana, open-loop Zipfian harness, uncached baseline |
-| **1 · Naive TTL cache** | ✅ | Cache-aside with TTL only. Staleness knowingly bad, and asserted as a test |
-| **2 · Exact invalidation** | ✅ | CDC tailer + checkpointing, versioned CAS, negative caching, independent cache ring, proportional circuit breaker, `cachetctl` |
-| **3 · Consistency model** | ✅ | Affected-key extraction, session tokens, 4 levels, conformance suite, Go SDK with OTel watermark propagation |
-| **4 · Leases · adaptive admission · Sextant** | ⬜ | The stampede graph, per-key r:w admission, continuous verification |
-| **5 · Proof** | ⬜ | 9 injected faults, each caught *and explained* |
-| **6 · Publish** | ⬜ | Writeup + the MyRocks-vs-InnoDB cache-value study |
+| **Available** | Integrated read cache for sharded MySQL, with read-through fill | ✅ |
+| | Exact invalidation on the write path — after commit, before the ack | ✅ |
+| | Exact invalidation from the binlog, with durable checkpoints and idempotent replay | ✅ |
+| | Conditional writes that resolve their affected rows inside the transaction | ✅ |
+| | Four consistency levels, selected per request | ✅ |
+| | Session tokens: read-own-writes, read-own-inserts, read-own-deletes, monotonic reads | ✅ |
+| | Causal propagation across service boundaries via OpenTelemetry baggage | ✅ |
+| | Negative caching, with read-own-inserts over a cached absence | ✅ |
+| | Cache sharding independent of database sharding | ✅ |
+| | Proportional circuit breaker — sheds a fraction of traffic to an unhealthy node | ✅ |
+| | Go SDK (`cachet-go`) that carries the session for you | ✅ |
+| | Operator CLI (`cachetctl`) — health, routing, key inspection, manual invalidation | ✅ |
+| | Prometheus metrics and a provisioned Grafana dashboard | ✅ |
+| **Roadmap** | Leases — origin load per key bounded regardless of concurrency | ⬜ |
+| | Adaptive per-key admission driven by observed read:write ratio | ⬜ |
+| | Sextant — continuous consistency verification and a live SLO per level | ⬜ |
+| | Shadow mode — measure your consistency before changing any application code | ⬜ |
 
-### What runs today
+**On the roadmap items:** they are described above because they are what Cachet is *for* — the
+reasons the architecture is shaped the way it is. They are not implemented yet, and nothing in this
+repository pretends otherwise.
 
-| Component | State |
-|---|---|
-| `cachet` — query engine, cache-aware reads, versioned CAS fill/tombstone | ✅ Working |
-| `flux` — CDC tailer, durable atomic binlog checkpoints | ✅ Working |
-| `cachetctl` — operator CLI: status, ring, inspect, invalidate, checkpoint | ✅ Working |
-| `benchctl` — open-loop driver, staleness probe, report generator | ✅ Working |
-| Synchronous write-path invalidation | ✅ Working *(arrived early from Phase 3)* |
-| Negative caching with read-own-inserts | ✅ Working |
-| Independent cache ring — routed separately from database shards | ✅ Working |
-| Proportional circuit breaker — sheds a fraction, never all | ✅ Working |
-| `pkg/cachet` Go SDK — carries the session, propagates it via OTel baggage | ✅ Working |
-| Consistency conformance suite — 10 operations × 4 levels | ✅ Working |
-| Conditional writes with exact affected-key extraction | ✅ Working |
-| Leases · adaptive admission · Sextant | ⬜ Phase 4 |
+## Guarantees, and how they are checked
 
-### Four results worth knowing about
+Every level's promise — and every documented *non*-promise — is executed as a cell of a conformance
+matrix across all four levels. The suite also runs the invalidation-dependent cells against a
+deliberately naive cache and **requires them to fail**, because a consistency test that has never
+failed is proving nothing.
 
-**Read-own-writes held in Phase 1 with no invalidation at all.** Writes never touched the cache, yet
-a session carrying its token could not be served a stale entry — because the watermark check rejects
-anything filled from a database state older than its own write. That is the payoff of watermarking
-on the *fill* version rather than the row version, a decision made on paper before any of the code
-existed.
+```bash
+make test-consistency     # the matrix, plus the test that proves the matrix works
+```
 
-**A TTL-only cache beats a correct one on hit rate, because it has stopped noticing writes.** At the
-production 4-hour TTL it reached 93.9% and 46 origin QPS; exact invalidation gives some of that back
-(89.7%, 78 QPS). Two of the TTL-only runs hit 100% with zero origin load. It is "perfect" precisely
-to the extent that it is wrong. Publishing that trade is the point.
+Two results worth stating plainly, because they cut against the product's own pitch:
 
-**The conformance suite found a real bug in its first week.** The cache entry carried the payload but
-not `tenant_id` or `status` — a Phase 1 decision that was correct until conditional writes made
-`status` meaningful. From then on, the same key returned a *different record* depending on whether
-the cache happened to be warm: the database said `2`, the cache said `0`, and nothing anywhere
-reported a problem. A cache whose hits and misses disagree makes every guarantee above it conditional
-on state no caller can see. That is now a conformance cell of its own.
-
-**Shedding a read costs hit rate; shedding an invalidation costs correctness.** The circuit breaker
-gates reads and fills but never tombstones. A shed read is served from the database and nobody is
-misinformed — but a shed invalidation leaves a stale entry alive, still serving a value the database
-has already changed. That asymmetry is enforced by a test, and the test was checked by making the
-mistake on purpose: gating tombstones produced *"10 of 10 tombstones to a dead node were silently
-swallowed."*
+- **A TTL-only cache reaches a better hit rate than a correct one**, because it has stopped noticing
+  writes. At a four-hour TTL it reached 93.9% and 46 origin QPS; exact invalidation gives some of
+  that back — 89.7% and 78 QPS. It is "perfect" precisely to the extent that it is wrong, and that
+  trade is published rather than hidden.
+- **Read-own-writes holds even with no invalidation at all**, carried entirely by the session
+  watermark. That is the payoff of watermarking on the fill version rather than the row version.
 
 ## Benchmarks
 
-*Populated as phases land. Every row is regenerated by `make bench-report` from JSON in
-`bench/results/`; no number here is typed by hand.*
+Every row below is regenerated by `make bench-report` from JSON in `bench/results/`. No number here
+is typed by hand, and the empty rows stay empty until the capability that fills them exists.
 
-**Origin QPS** is steady-state database load under W2 — the cost metric the caching claim actually
-rests on. The stampede number (one hot key, ten thousand concurrent readers) is a separate
-measurement and arrives with leases in Phase 4a.
+**Origin QPS** is steady-state database load — the cost metric the caching claim actually rests on.
 
 | Configuration | Hit rate | p99 read | Origin QPS | Staleness | Cache mem |
 |---|---|---|---|---|---|
@@ -233,19 +265,19 @@ measurement and arrives with leases in Phase 4a.
 ### How to read that table
 
 **The result so far is load, not latency.** Caching cut steady-state database load by **81%**
-(760 → 145 origin QPS in Phase 1), and exact invalidation cut staleness from **10.07 s to 34.98 ms —
+(760 → 145 origin QPS), and exact invalidation cut staleness from **10.07 s to 34.98 ms —
 288× better** — while giving back some hit rate as the price of correctness.
 
-**The p99 column is not a result yet, and we say so rather than rounding it into one.** Read p99 has
-been unmeasurable for three phases running: the run-to-run spreads swamp every difference
-(TTL-only ranged 10.35–77.18 ms). When the spread exceeds the effect, nothing has been measured.
-Two runs — one of each configuration — would have produced a confident and false claim.
+**The p99 column is not a result yet, and we say so rather than rounding it into one.** The
+run-to-run spreads swamp every difference (TTL-only ranged 10.35–77.18 ms). When the spread exceeds
+the effect, nothing has been measured. Two runs — one of each configuration — would have produced a
+confident and false claim.
 
 **Why the cache does not help p99 *here*, and why that is expected.** At 500 rps against three idle
 MySQL shards, an uncached point lookup is already fast; the cache removes a database round trip that
 was not the bottleneck. The cost it removes is *load*, not wall time. A p99 win should appear once
-the origin is under enough pressure to queue — which is exactly what Phase 4a's stampede workload is
-built to create.
+the origin is under enough pressure to queue, which is what the stampede workload is built to create
+— and that measurement arrives with leases.
 
 **Standing caveat on every number above:** measured on a Docker Desktop VM, whose virtualised
 filesystem gives I/O latency that is neither predictable nor representative — and MyRocks is
@@ -277,6 +309,30 @@ it rides on, while CDC adds a variable delivery delay:
 
 <sub>Detailed product, delivery and execution planning is kept out of this repo. The two documents
 above are published because a reader cannot check our claims without them.</sub>
+
+## Compatibility and versioning
+
+| | |
+|---|---|
+| **Database** | MySQL 8.0 with MyRocks (Percona Server). InnoDB is supported and CI-tested |
+| **Cache** | Valkey 8 (default) or Redis — protocol- and Lua-compatible ([ADR 0002](./docs/adr/0002-redis-vs-valkey.md)) |
+| **Go** | 1.27+ for the SDK |
+| **Transports** | gRPC over TCP and Unix sockets, both first-class |
+
+Semver on every artifact, with the gRPC protocol versioned independently as `cachet.v1`. Engine and
+SDK negotiate on connect, so a mismatch is a startup error rather than a puzzling failure later.
+
+**A change to the consistency model is always a major version.** The guarantee is the contract.
+
+## Contributing
+
+Issues and pull requests are welcome. [`CONTRIBUTING.md`](./CONTRIBUTING.md) has the engineering
+standards and the CI gate; the short version is that tests come before the code they cover, and any
+decision that would otherwise be re-argued gets an ADR.
+
+## Licence
+
+[Apache 2.0](./LICENSE).
 
 ## Prior art
 
