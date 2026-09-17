@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/cachet-logo.png">
-    <img src="./.github/assets/cachet-logo.png" alt="Cachet" width="340">
+    <img src="./.github/assets/cachet-logo-on-light.png" alt="Cachet" width="340">
   </picture>
 </p>
 

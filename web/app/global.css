@@ -3,8 +3,7 @@
 @import 'fumadocs-ui/css/preset.css';
 
 /* Cachet's mark is a teal-to-green gradient, so the site's accent follows it rather than shipping
-   the framework default. The wordmark in the logo is white, which is why the header lockup sits on
-   a dark chip in light mode — see components/logo.tsx. */
+   the framework default. */
 :root {
   --color-fd-primary: oklch(0.72 0.14 178);
 }

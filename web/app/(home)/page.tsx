@@ -6,16 +6,25 @@ export default function HomePage() {
     <main className="flex flex-1 flex-col">
       {/* Hero */}
       <section className="mx-auto flex w-full max-w-5xl flex-col items-center px-6 pt-20 pb-16 text-center">
-        <div className="rounded-2xl bg-neutral-950 px-8 py-6">
-          <Image
-            src="/cachet-logo.png"
-            alt="Cachet"
-            width={420}
-            height={140}
-            priority
-            className="h-16 w-auto"
-          />
-        </div>
+        {/* One asset per theme, swapped by CSS rather than JavaScript so the correct lockup is in
+            the server-rendered HTML. See components/logo.tsx. */}
+        <Image
+          src="/cachet-logo-on-light.png"
+          alt="Cachet"
+          width={420}
+          height={140}
+          priority
+          className="h-16 w-auto dark:hidden"
+        />
+        <Image
+          src="/cachet-logo.png"
+          alt=""
+          aria-hidden
+          width={420}
+          height={140}
+          priority
+          className="hidden h-16 w-auto dark:block"
+        />
 
         <h1 className="mt-10 max-w-3xl text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
           A read cache that proves its own correctness

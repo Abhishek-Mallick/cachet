@@ -3,21 +3,31 @@ import Image from 'next/image';
 /**
  * The header lockup.
  *
- * The wordmark in the logo is white with a transparent background, so on a light page it would be
- * invisible. Rather than ship a second asset, the mark sits on a dark chip in both themes — which
- * also keeps the gradient reading the same way regardless of what is behind it.
+ * Two assets, one per theme. The wordmark is white in `cachet-logo.png` and near-black in
+ * `cachet-logo-on-light.png`; the mark is the same teal gradient in both, because it reads on either
+ * ground. Both are rendered and one is hidden by CSS rather than picked in JavaScript, so the right
+ * one is in the server-rendered HTML and there is no flash of the wrong lockup on load.
  */
 export function Logo() {
   return (
-    <span className="inline-flex items-center rounded-md bg-neutral-950 px-2.5 py-1.5">
+    <>
       <Image
-        src="/cachet-logo.png"
+        src="/cachet-logo-on-light.png"
         alt="Cachet"
         width={108}
         height={36}
         priority
-        className="h-5 w-auto"
+        className="h-5 w-auto dark:hidden"
       />
-    </span>
+      <Image
+        src="/cachet-logo.png"
+        alt=""
+        aria-hidden
+        width={108}
+        height={36}
+        priority
+        className="hidden h-5 w-auto dark:block"
+      />
+    </>
   );
 }

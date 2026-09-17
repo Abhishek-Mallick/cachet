@@ -21,10 +21,22 @@ npm run build
 
 ## A note on the logo
 
-`public/cachet-logo.png` has a **white wordmark on a transparent background**, so it disappears on a
-light surface. Both the header and the hero place it on a dark chip rather than shipping a second
-asset — see `components/logo.tsx`. If a light-background variant is ever added, that is the one
-place to change.
+There are two files, and the difference is only the wordmark:
+
+| File | Wordmark | Used on |
+|---|---|---|
+| `public/cachet-logo.png` | White | Dark backgrounds |
+| `public/cachet-logo-on-light.png` | Near-black | Light backgrounds |
+
+Every pixel of the mark — the teal gradient — is identical in both, because it reads on either
+ground. The
+light variant is generated from the original by `scripts/derive-light-logo.py`, which recolours only
+the achromatic pixels — so it stays in sync by re-running a script rather than by someone
+remembering to re-export it. Run that script when the source logo changes and commit both outputs.
+
+Both are rendered wherever the lockup appears and one is hidden with `dark:hidden` / `dark:block`,
+so the correct one is in the server-rendered HTML and there is no flash of the wrong lockup on load.
+Picking in JavaScript would guarantee that flash, since the theme is not known until hydration.
 
 ## Keeping it honest
 
