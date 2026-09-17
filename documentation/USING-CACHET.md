@@ -18,6 +18,7 @@
 | Operator CLI — status, ring, inspect, invalidate, checkpoint | `cachetctl` | ✅ Working |
 | Consistency verifier | `sextant` | ⬜ Roadmap |
 | Independent cache ring + proportional circuit breaker | (in `cachet`) | ✅ Working |
+| Leases — bounded origin load per key under a stampede | (in `cachet`) | ✅ Working |
 | Go SDK — carries the session, propagates it via OTel baggage | `pkg/cachet` | ✅ Working |
 
 ---
@@ -90,6 +91,15 @@ cache:
   # concentrated on one. An empty list disables caching (the uncached baseline).
   addresses: ["10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379"]
 
+  # Cache-fill admission: who may read the origin on a miss, and how long everyone else waits.
+  # Tuning knobs, not guarantee settings — a lease changes who PAYS for a fill, never what a read
+  # is allowed to return.
+  lease:
+    ttl: 2s                  # ceiling on damage: how long a dead holder can block a key
+    wait_attempts: 4         # 0 disables waiting entirely; leases still bound who fills
+    wait_backoff: 5ms        # first wait, doubling up to the cap
+    wait_backoff_max: 50ms
+
   # Per-node proportional circuit breaker. Tuning knobs, not guarantee settings.
   breaker:
     window: 10s          # how far back health is judged
@@ -135,6 +145,8 @@ These change what Cachet **promises**. They are logged at boot and exported as
 | `consistency.max_affected_keys` | `1000` | Where a conditional write stops resolving affected keys exactly and falls back to CDC, reporting `degraded=true` |
 | `consistency.max_session_shards` | — | Caps session-token size before it starts evicting watermarks |
 | `consistency.entry_ttl` | `4h` | The last-resort safety net and `EVENTUAL` convergence bound. **Correctness comes from invalidation; the TTL is the backstop, not the strategy** |
+| `cache.lease.ttl` | `2s` | How long a holder may own a fill. A dead holder stops blocking the key after this. Erring short is the cheaper mistake: two fillers cost one extra origin read, a long stall costs every reader of a hot key |
+| `cache.lease.wait_attempts` | `4` | How many times a caller re-checks while another fill is in flight. **Zero means never wait** — leases still bound who fills, but origin load is unbounded again and nobody is delayed |
 | `consistency.synchronous_invalidation` | `true` | ON: a committed write is invisible to other sessions for microseconds. OFF: invalidation falls entirely to CDC and other sessions are bounded by `cdc_lag_bound` instead |
 
 ---

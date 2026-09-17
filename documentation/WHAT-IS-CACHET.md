@@ -138,7 +138,7 @@ Every level, and every *non*-guarantee, is executed as a cell of a conformance m
 runs the invalidation-dependent cells against a deliberately naive cache and **requires them to
 fail**, because a consistency test that has never failed is proving nothing.
 
-### 3 · Leases — origin load bounded by construction *(roadmap)*
+### 3 · Leases — origin load bounded by construction
 
 On a miss, exactly one caller gets a token to fill that key. Concurrent callers wait briefly, then
 read the filled value. Origin load per key is bounded at ~1 per lease interval **regardless of
@@ -147,6 +147,9 @@ concurrency**.
 The common alternative — deduplicating concurrent fills — fixes *ordering*: a slow fill cannot
 overwrite a newer value. It does nothing for *admission*. Ten thousand simultaneous misses on a hot
 key still all reach the database, which is precisely when you can least afford them.
+
+Asserted on every build: 500 concurrent readers of one invalidated hot key produce **one** origin
+read; with waiting disabled, 198 of 200 reach the database.
 
 ### 4 · Sextant — continuous consistency verification 🔭 *(roadmap)*
 

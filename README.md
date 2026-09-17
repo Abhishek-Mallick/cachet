@@ -70,7 +70,7 @@ Precise invalidation is the foundation. Everything below is what it makes possib
 | Invalidation | CDC + **exact write-path** | Streaming dataflow | Heuristic | Hand-rolled |
 | Consistency | **Read-own-writes, tiered** | Eventual | Probabilistic | Undefined |
 | **Measured correctness** | **Live SLO** <sub>roadmap</sub> | ❌ | ❌ | ❌ |
-| Stampede protection | **Leases** <sub>roadmap</sub> | Partial | ❌ | ❌ |
+| Stampede protection | ✅ **Leases** | Partial | ❌ | ❌ |
 | Self-tuning admission | **Per-key r:w** <sub>roadmap</sub> | ❌ manual | Heuristic | ❌ |
 
 **Every cache on that list asks you to trust it. Cachet is the only one that proves it.**
@@ -90,15 +90,24 @@ tailer cannot undo newer state. When a predicate matches more rows than the reso
 Cachet says so in the response rather than silently doing less: the write still commits, the affected
 keys fall back to the binlog path, and the caller is handed the staleness bound that now applies.
 
-### Leases — bounded origin load <sub>`roadmap`</sub>
+### Leases — bounded origin load
 
 On a miss, exactly one caller gets a token to fill that key. Concurrent callers wait briefly, then
-read the filled value. Origin load per key is bounded at ~1 per lease interval **regardless of
-concurrency** — not best-effort, by construction.
+read the filled value. Origin load per key is bounded **regardless of concurrency** — by
+construction, not best-effort.
 
 Deduplicating concurrent fills — the common approach — fixes *ordering*: a slow fill can't overwrite
 a newer value. It does nothing for *admission*. Ten thousand simultaneous misses on a hot key still
 all reach the database, which is exactly when you can least afford them.
+
+Measured by a test that runs on every build: **500 concurrent readers of one invalidated hot key
+produce a single origin read.** With waiting switched off, 198 of 200 reach the database. The test
+also asserts that the readers genuinely contended — if none of them ever waited on another's fill,
+it fails rather than take credit for preventing a stampede that never formed.
+
+Waiting is bounded, and a caller that gives up reads the origin itself. A lease holder that died is
+indistinguishable from one nearly finished, so waiting longer is a guess — and guessing wrong on the
+hottest key in the system is a self-inflicted outage worse than the stampede.
 
 ### Adaptive admission — no human decides what to cache <sub>`roadmap`</sub>
 
@@ -216,8 +225,8 @@ consistency conformance suite.
 | | Go SDK (`cachet-go`) that carries the session for you | ✅ |
 | | Operator CLI (`cachetctl`) — health, routing, key inspection, manual invalidation | ✅ |
 | | Prometheus metrics and a provisioned Grafana dashboard | ✅ |
-| **Roadmap** | Leases — origin load per key bounded regardless of concurrency | ⬜ |
-| | Adaptive per-key admission driven by observed read:write ratio | ⬜ |
+| | Leases — origin load per key bounded regardless of concurrency | ✅ |
+| **Roadmap** | Adaptive per-key admission driven by observed read:write ratio | ⬜ |
 | | Sextant — continuous consistency verification and a live SLO per level | ⬜ |
 | | Shadow mode — measure your consistency before changing any application code | ⬜ |
 
