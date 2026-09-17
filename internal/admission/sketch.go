@@ -110,6 +110,13 @@ func (s *Sketch) RecordRead(key string) { s.record(key, true) }
 func (s *Sketch) RecordWrite(key string) { s.record(key, false) }
 
 func (s *Sketch) record(key string, isRead bool) {
+	// Hashing happens OUTSIDE the lock. It is a pure function of the key and needs no shared state,
+	// and it is by far the expensive part — roughly 400ns of the work per call. Holding a single
+	// global mutex across it serialised every read in the engine behind one hash computation, which
+	// showed up not as reduced throughput but as a tail: measured p99 went from 34ms to 629ms with
+	// admission enabled. Under a lock convoy the cost lands on whichever request is unlucky.
+	cells := s.cells(key)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollLocked()
@@ -118,18 +125,20 @@ func (s *Sketch) record(key string, isRead bool) {
 	if isRead {
 		table = s.reads[s.head]
 	}
-	for d := 0; d < s.depth; d++ {
-		table[s.cell(key, d)]++
+	for _, c := range cells {
+		table[c]++
 	}
 }
 
 // Counts estimates a key's reads and writes over the window.
 func (s *Sketch) Counts(key string) (reads, writes uint32) {
+	cells := s.cells(key)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rollLocked()
 
-	return s.estimateLocked(s.reads, key), s.estimateLocked(s.writes, key)
+	return s.estimateLocked(s.reads, cells), s.estimateLocked(s.writes, cells)
 }
 
 // estimateLocked takes the MINIMUM across hash rows, summed over live buckets.
@@ -137,18 +146,31 @@ func (s *Sketch) Counts(key string) (reads, writes uint32) {
 // The minimum is what makes this a count-min sketch rather than a pile of collisions: every row's
 // counter is at least the true count, so the smallest of them is the closest over-estimate
 // available.
-func (s *Sketch) estimateLocked(tables [][]uint32, key string) uint32 {
+func (s *Sketch) estimateLocked(tables [][]uint32, cells []int) uint32 {
 	var total uint32
 	for b := 0; b < s.buckets; b++ {
 		min := ^uint32(0)
-		for d := 0; d < s.depth; d++ {
-			if v := tables[b][s.cell(key, d)]; v < min {
+		for _, c := range cells {
+			if v := tables[b][c]; v < min {
 				min = v
 			}
 		}
 		total += min
 	}
 	return total
+}
+
+// cells returns a key's counter index for each hash row.
+//
+// Computed once per call rather than once per (bucket, row). The cell index does not depend on the
+// bucket, so recomputing it inside the bucket loop did the same hashing six times over — and did it
+// while holding the lock.
+func (s *Sketch) cells(key string) []int {
+	out := make([]int, s.depth)
+	for d := range out {
+		out[d] = s.cell(key, d)
+	}
+	return out
 }
 
 // cell locates a key's counter for one hash row.
