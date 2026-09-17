@@ -73,6 +73,7 @@ func run() error {
 	cacheClient, err := cache.New(ctx, cache.Options{
 		Addresses: cfg.Cache.Addresses,
 		TTL:       cfg.Consistency.EntryTTL,
+		LeaseTTL:  cfg.Cache.Lease.TTL,
 		Breaker:   breakerOptions(cfg.Cache.Breaker),
 	})
 	if err != nil {

@@ -38,6 +38,14 @@ type Cache interface {
 	Get(ctx context.Context, key string) (cache.Entry, bool, error)
 	Fill(ctx context.Context, key string, e cache.Entry) (bool, error)
 	Tombstone(ctx context.Context, key string, version uint64) (bool, error)
+
+	// GetOrLease reads an entry or takes the exclusive right to fill it, in one round trip. It is
+	// what bounds origin load per key: without it, every concurrent miss becomes an origin read.
+	GetOrLease(ctx context.Context, key string) (cache.LeaseResult, error)
+
+	// FillWithLease fills and hands the lease back in the same operation, so no window exists in
+	// which the value is present but the lease is still held.
+	FillWithLease(ctx context.Context, key string, e cache.Entry, token string) (bool, error)
 }
 
 // Options configures an Engine.
@@ -73,6 +81,10 @@ type Options struct {
 	// With it off, invalidation falls entirely to the CDC tailer — see config.Consistency.
 	SynchronousInvalidation bool
 
+	// Leases bounds origin load per key. The zero value disables waiting entirely: a caller told
+	// another fill is in progress goes straight to the database rather than waiting for it.
+	Leases WaitPolicy
+
 	// Now supplies the current time. Injectable so the freshness rules can be tested against a
 	// fixed instant rather than against the machine's clock.
 	Now func() time.Time
@@ -100,6 +112,7 @@ type Engine struct {
 	cache            Cache
 	maxSessionShards int
 	maxAffectedKeys  int
+	leases           WaitPolicy
 	cdcLagBound      time.Duration
 	maxClockSkew     time.Duration
 	syncInvalidation bool
@@ -161,6 +174,7 @@ func New(opts Options) (*Engine, error) {
 		cache:            opts.Cache,
 		maxSessionShards: maxShards,
 		maxAffectedKeys:  maxAffected,
+		leases:           opts.Leases,
 		cdcLagBound:      cdcLag,
 		maxClockSkew:     opts.MaxClockSkew,
 		syncInvalidation: opts.SynchronousInvalidation,
@@ -217,7 +231,8 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 	}
 	token := consistency.TokenFromProto(req.GetSession(), e.maxSessionShards)
 
-	if entry, served := e.fromCache(ctx, reqmt, key.String(), id, token); served {
+	entry, served, lease := e.fromCacheOrLease(ctx, reqmt, key.String(), id, token)
+	if served {
 		token.Advance(string(id), entry.FillVersion)
 		// A negative entry is a hit that reports absence. Serving it as found=false is what makes
 		// "this row does not exist" a cacheable answer rather than a guaranteed database query.
@@ -236,7 +251,7 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 		// Absence is an answer, not an error: "this row does not exist" is a cacheable fact, and an
 		// insert must later invalidate that negative entry.
 		token.Advance(string(id), uint64(fill))
-		e.fillNegative(ctx, key.String(), fill)
+		e.fillNegativeHoldingLease(ctx, key.String(), fill, lease)
 		return &cachetv1.GetResponse{
 			Found:   false,
 			Meta:    readMeta(reqmt.Level, 0, fill),
@@ -249,7 +264,7 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 	// Observing advances the watermark, which is what gives monotonic reads without any extra
 	// state (CONSISTENCY.md §3.2).
 	token.Advance(string(id), uint64(fill))
-	e.fill(ctx, key.String(), rec, fill)
+	e.fillHoldingLease(ctx, key.String(), rec, fill, lease)
 
 	return &cachetv1.GetResponse{
 		Found:   true,
@@ -265,26 +280,20 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 // to the database. A cache that has stopped answering must not take the system down with it — but
 // it is counted, because a silent fallback to the origin is exactly the failure that looks like a
 // mysterious database load spike.
-func (e *Engine) fromCache(
+func (e *Engine) fromCacheOrLease(
 	ctx context.Context,
 	req consistency.Requirement,
 	key string,
 	shardID storage.ShardID,
 	token *consistency.Token,
-) (cache.Entry, bool) {
+) (cache.Entry, bool, string) {
 	if e.cache == nil || req.Level.BypassesCache() {
-		return cache.Entry{}, false
+		return cache.Entry{}, false, ""
 	}
 
-	entry, hit, err := e.cache.Get(ctx, key)
-	switch {
-	case err != nil:
-		e.metrics.RecordCacheOp("get", "error")
-		e.log.WarnContext(ctx, "cache read failed; falling through to the origin", "key", key, "err", err)
-		return cache.Entry{}, false
-	case !hit:
-		e.metrics.RecordCacheOp("get", "miss")
-		return cache.Entry{}, false
+	entry, hit, lease := e.readWaitingForAnyFill(ctx, key)
+	if !hit {
+		return cache.Entry{}, false, lease
 	}
 
 	watermark, known := token.Watermark(string(shardID))
@@ -301,11 +310,72 @@ func (e *Engine) fromCache(
 		// between them is what says whether a level's cost is coming from cache capacity or from
 		// the guarantee itself.
 		e.metrics.RecordCacheOp("get", "stale")
-		return cache.Entry{}, false
+
+		// A stale hit still has to go to the origin, so it needs a lease for the refill exactly as a
+		// miss does. Without one, a hot key whose watermark has just moved — which is every hot key
+		// immediately after it is written — sends every concurrent reader to the database at once.
+		return cache.Entry{}, false, e.leaseForRefill(ctx, key)
 	}
 
 	e.metrics.RecordCacheOp("get", "hit")
-	return entry, true
+	return entry, true, ""
+}
+
+// readWaitingForAnyFill reads the cache, waiting briefly if another caller is already filling.
+//
+// Returns the lease token when this caller has been made responsible for the fill, and an empty
+// token otherwise — including when the wait was exhausted. A caller that waited and gave up still
+// reads the origin: it is served either way, and the only thing it loses is the chance to have been
+// served from someone else's fill.
+func (e *Engine) readWaitingForAnyFill(ctx context.Context, key string) (cache.Entry, bool, string) {
+	for attempt := 0; ; attempt++ {
+		res, err := e.cache.GetOrLease(ctx, key)
+		if err != nil {
+			e.metrics.RecordCacheOp("get", "error")
+			e.log.WarnContext(ctx, "cache read failed; falling through to the origin", "key", key, "err", err)
+			return cache.Entry{}, false, ""
+		}
+
+		switch res.Outcome {
+		case cache.LeaseHit:
+			return res.Entry, true, ""
+		case cache.LeaseGranted:
+			e.metrics.RecordCacheOp("get", "miss")
+			e.metrics.RecordLease("granted")
+			return cache.Entry{}, false, res.Token
+		}
+
+		// LeaseWait: somebody else is filling this key.
+		if attempt >= e.leases.MaxAttempts() {
+			// Bounded, always. A holder that died is indistinguishable from one that is nearly
+			// finished, so waiting longer is a guess — and guessing wrong on the hottest key in the
+			// system is a self-inflicted outage. Read the origin instead.
+			e.metrics.RecordCacheOp("get", "miss")
+			e.metrics.RecordLease("wait_exhausted")
+			return cache.Entry{}, false, ""
+		}
+
+		select {
+		case <-ctx.Done():
+			e.metrics.RecordLease("wait_cancelled")
+			return cache.Entry{}, false, ""
+		case <-time.After(e.leases.Backoff(attempt)):
+		}
+		e.metrics.RecordLease("waited")
+	}
+}
+
+// leaseForRefill takes a lease for a refill that a freshness rejection made necessary.
+//
+// A failure here is not an error: the refill proceeds without a lease, which costs admission
+// control for this one key and nothing else. The compare-and-set still protects correctness.
+func (e *Engine) leaseForRefill(ctx context.Context, key string) string {
+	res, err := e.cache.GetOrLease(ctx, key)
+	if err != nil || res.Outcome != cache.LeaseGranted {
+		return ""
+	}
+	e.metrics.RecordLease("granted")
+	return res.Token
 }
 
 // fill writes a freshly read row back to the cache.
@@ -314,6 +384,12 @@ func (e *Engine) fromCache(
 // from the database, and failing their request because the cache write failed would turn a
 // degradation into an outage.
 func (e *Engine) fill(ctx context.Context, key string, rec storage.Record, fillVersion storage.Version) {
+	e.fillHoldingLease(ctx, key, rec, fillVersion, "")
+}
+
+// fillHoldingLease is fill by a caller that was granted the lease for this key, which the fill hands
+// back. An empty token means no lease was held.
+func (e *Engine) fillHoldingLease(ctx context.Context, key string, rec storage.Record, fillVersion storage.Version, lease string) {
 	if e.cache == nil {
 		return
 	}
@@ -324,7 +400,7 @@ func (e *Engine) fill(ctx context.Context, key string, rec storage.Record, fillV
 		Status:      rec.Status,
 		Payload:     rec.Payload,
 	}
-	e.applyFill(ctx, key, entry)
+	e.applyFillHoldingLease(ctx, key, entry, lease)
 }
 
 // fillNegative caches the fact that a row does not exist.
@@ -333,6 +409,15 @@ func (e *Engine) fill(ctx context.Context, key string, rec storage.Record, fillV
 // bypassing the cache entirely. It is only safe because an insert invalidates the negative entry
 // through the same compare-and-set as any other write, which is what gives read-own-inserts.
 func (e *Engine) fillNegative(ctx context.Context, key string, fillVersion storage.Version) {
+	e.fillNegativeHoldingLease(ctx, key, fillVersion, "")
+}
+
+// fillNegativeHoldingLease is fillNegative by a caller holding the key's lease.
+//
+// Absence is filled under a lease exactly like a value: a key that does not exist is just as
+// capable of being stampeded as one that does, and a workload probing for missing rows is the case
+// negative caching was built for in the first place.
+func (e *Engine) fillNegativeHoldingLease(ctx context.Context, key string, fillVersion storage.Version, lease string) {
 	if e.cache == nil {
 		return
 	}
@@ -345,7 +430,12 @@ func (e *Engine) fillNegative(ctx context.Context, key string, fillVersion stora
 }
 
 func (e *Engine) applyFill(ctx context.Context, key string, entry cache.Entry) {
-	applied, err := e.cache.Fill(ctx, key, entry)
+	e.applyFillHoldingLease(ctx, key, entry, "")
+}
+
+// applyFillHoldingLease writes the entry and releases the lease in the same operation.
+func (e *Engine) applyFillHoldingLease(ctx context.Context, key string, entry cache.Entry, lease string) {
+	applied, err := e.cache.FillWithLease(ctx, key, entry, lease)
 	switch {
 	case err != nil:
 		// The caller already holds the correct answer from the database. Failing their request

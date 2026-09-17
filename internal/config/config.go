@@ -56,12 +56,46 @@ type Shard struct {
 type Cache struct {
 	Addresses []string `koanf:"addresses"`
 
+	// Lease bounds origin load per key under a stampede.
+	Lease Lease `koanf:"lease"`
+
 	// Breaker configures the per-node proportional circuit breaker.
 	//
 	// These are tuning knobs, not guarantee settings: shedding changes hit rate and latency, never
 	// what Cachet promises about staleness. A shed read is served from the database, which is at
 	// least as fresh as the cache would have been.
 	Breaker Breaker `koanf:"breaker"`
+}
+
+// Lease configures cache-fill admission: who is allowed to read the origin on a miss, and how long
+// everyone else waits for them.
+//
+// These are tuning knobs, not guarantee settings. A lease changes who PAYS for a fill and when, not
+// what any read is allowed to return — the compare-and-set is what protects correctness, and it is
+// unaffected by any value here.
+type Lease struct {
+	// TTL bounds how long one caller may hold the right to fill a key.
+	//
+	// It is a ceiling on damage rather than a target: a holder that dies mid-fill stops blocking the
+	// key after this long. Too short and two callers fill the same key, costing one extra origin
+	// read and nothing else. Too long and a dead holder stalls a hot key for the whole interval. So
+	// erring short is the cheaper mistake.
+	TTL time.Duration `koanf:"ttl"`
+
+	// WaitAttempts is how many times a caller re-checks the cache while another fill is in flight
+	// before reading the origin itself.
+	//
+	// Zero means never wait: leases still bound who fills, but nobody is ever delayed. Origin load
+	// goes unbounded again — a legitimate trade for a latency-critical deployment, and the setting a
+	// benchmark uses to measure what the waiting is actually buying.
+	WaitAttempts int `koanf:"wait_attempts"`
+
+	// WaitBackoff is the first wait, doubling up to WaitBackoffMax.
+	//
+	// It grows because retrying at a fixed interval turns every waiter into a poller at the same
+	// frequency, trading a stampede on the database for a smaller one on the cache node.
+	WaitBackoff    time.Duration `koanf:"wait_backoff"`
+	WaitBackoffMax time.Duration `koanf:"wait_backoff_max"`
 }
 
 // Breaker configures how aggressively an unhealthy cache node is avoided.
@@ -174,6 +208,12 @@ func Default() Config {
 			ServiceName:   "cachet",
 		},
 		Cache: Cache{
+			Lease: Lease{
+				TTL:            2 * time.Second,
+				WaitAttempts:   4,
+				WaitBackoff:    5 * time.Millisecond,
+				WaitBackoffMax: 50 * time.Millisecond,
+			},
 			Breaker: Breaker{
 				Window:       10 * time.Second,
 				Buckets:      10,
@@ -300,6 +340,9 @@ func (c Config) Validate() error {
 		seenCache[addr] = struct{}{}
 	}
 
+	if err := c.Cache.Lease.validate(); err != nil {
+		return err
+	}
 	if err := c.Cache.Breaker.validate(); err != nil {
 		return err
 	}
@@ -313,6 +356,26 @@ func (c Config) Validate() error {
 	}
 	if c.Shutdown.DrainTimeout <= 0 {
 		return fmt.Errorf("config: shutdown.drain_timeout must be positive, got %s", c.Shutdown.DrainTimeout)
+	}
+	return nil
+}
+
+func (l Lease) validate() error {
+	if l.TTL <= 0 {
+		// A non-positive lease TTL means a lease that never expires, so a holder that died mid-fill
+		// would make the key permanently unfillable and silently downgrade every reader of it to a
+		// database read.
+		return fmt.Errorf("config: cache.lease.ttl must be positive, got %s", l.TTL)
+	}
+	if l.WaitAttempts < 0 {
+		return fmt.Errorf("config: cache.lease.wait_attempts must not be negative, got %d", l.WaitAttempts)
+	}
+	if l.WaitBackoff < 0 {
+		return fmt.Errorf("config: cache.lease.wait_backoff must not be negative, got %s", l.WaitBackoff)
+	}
+	if l.WaitBackoffMax < l.WaitBackoff {
+		return fmt.Errorf("config: cache.lease.wait_backoff_max (%s) is below wait_backoff (%s)",
+			l.WaitBackoffMax, l.WaitBackoff)
 	}
 	return nil
 }

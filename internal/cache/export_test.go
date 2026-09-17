@@ -19,3 +19,19 @@ func (c *Client) SetRawForTest(ctx context.Context, key string, badVersion strin
 	}
 	return nil
 }
+
+// LeaseHeldForTest reports whether a lease is currently held for a key.
+//
+// It lives in export_test.go because the lease key is an internal detail: a test that reconstructed
+// it would silently stop testing anything the day the layout changed.
+func (c *Client) LeaseHeldForTest(ctx context.Context, key string) (bool, error) {
+	rdb, _, err := c.poolFor(key)
+	if err != nil {
+		return false, err
+	}
+	n, err := rdb.Exists(ctx, leaseKey(key)).Result()
+	if err != nil {
+		return false, fmt.Errorf("cache: lease held %s: %w", key, err)
+	}
+	return n == 1, nil
+}

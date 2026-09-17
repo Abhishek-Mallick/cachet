@@ -2,7 +2,9 @@ package cache
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -24,6 +26,8 @@ var (
 	tombstoneCASSource string
 	//go:embed lua/read.lua
 	readSource string
+	//go:embed lua/read_lease.lua
+	readLeaseSource string
 )
 
 // go-redis's Script wrapper tries EVALSHA first and falls back to EVAL on a NOSCRIPT reply, so a
@@ -32,6 +36,7 @@ var (
 	fillCAS      = redis.NewScript(fillCASSource)
 	tombstoneCAS = redis.NewScript(tombstoneCASSource)
 	readScript   = redis.NewScript(readSource)
+	readLease    = redis.NewScript(readLeaseSource)
 )
 
 // Options configures a Client.
@@ -54,7 +59,19 @@ type Options struct {
 	// Breaker configures the per-node proportional circuit breaker. The zero value gets
 	// DefaultBreaker.
 	Breaker breaker.Options
+
+	// LeaseTTL bounds how long one caller may hold the right to fill a key.
+	//
+	// It is a ceiling on damage, not a tuning knob: a holder that dies mid-fill stops blocking the
+	// key after this long. Too short and two callers fill the same key, which costs an extra origin
+	// read and nothing else, since the compare-and-set sorts out which value wins. Too long and a
+	// dead holder stalls a hot key for that entire interval. Erring short is therefore the cheaper
+	// mistake, which is why the default is close to a slow database read rather than to a timeout.
+	LeaseTTL time.Duration
 }
+
+// DefaultLeaseTTL is the lease interval used when none is configured.
+const DefaultLeaseTTL = 2 * time.Second
 
 // DefaultBreaker is the breaker configuration a Client uses when none is supplied.
 //
@@ -81,6 +98,7 @@ type Client struct {
 	pools    map[string]*redis.Client
 	breakers *breaker.Group
 	ttl      time.Duration
+	leaseTTL time.Duration
 }
 
 // New connects to every cache node and verifies each one answers.
@@ -120,11 +138,17 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		return nil, err
 	}
 
+	leaseTTL := opts.LeaseTTL
+	if leaseTTL <= 0 {
+		leaseTTL = DefaultLeaseTTL
+	}
+
 	c := &Client{
 		router:   router,
 		pools:    make(map[string]*redis.Client, len(router.Nodes())),
 		breakers: breakers,
 		ttl:      opts.TTL,
+		leaseTTL: leaseTTL,
 	}
 	for _, addr := range router.Nodes() {
 		rdb := redis.NewClient(&redis.Options{
@@ -268,6 +292,18 @@ func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
 // becomes visible: a healthy system rejects a few, and a sudden rise means reads are consistently
 // losing to writes on the same keys.
 func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
+	return c.FillWithLease(ctx, key, e, "")
+}
+
+// FillWithLease is Fill by a caller holding a lease on the key, which the fill hands back.
+//
+// Releasing inside the same script matters: a separate release would leave a window in which the
+// value is present but the lease is still held, and a caller arriving in that window would be told
+// to WAIT for a fill that has already finished.
+//
+// An empty token means the caller holds no lease — the negative-fill path and the CDC tailer both
+// write without ever asking for one.
+func (c *Client) FillWithLease(ctx context.Context, key string, e Entry, token string) (bool, error) {
 	rdb, node, err := c.poolFor(key)
 	if err != nil {
 		return false, err
@@ -277,6 +313,10 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 	if !b.Allow() {
 		// Shedding a fill costs only the hit this entry would have served later. The value is
 		// already on its way to the caller from the database.
+		//
+		// The lease is deliberately NOT released here: this caller never reached the node, so it
+		// cannot know whether its lease still exists. The TTL is what cleans it up, which is the
+		// case that expiry exists for.
 		return false, nil
 	}
 
@@ -285,7 +325,7 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 		negative = "1"
 	}
 
-	applied, err := fillCAS.Run(ctx, rdb, []string{key},
+	applied, err := fillCAS.Run(ctx, rdb, []string{key, leaseKey(key)},
 		encodeVersion(e.RowVersion),
 		encodeVersion(e.FillVersion),
 		e.Payload,
@@ -293,6 +333,7 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 		c.ttl.Milliseconds(),
 		e.TenantID,
 		e.Status,
+		token,
 	).Int64()
 	if err != nil {
 		b.Failure()
@@ -301,6 +342,127 @@ func (c *Client) Fill(ctx context.Context, key string, e Entry) (bool, error) {
 	b.Success()
 	return applied == 1, nil
 }
+
+// LeaseOutcome is what a GetOrLease call decided.
+type LeaseOutcome int
+
+const (
+	// LeaseHit means the entry was present and is returned; no lease was taken.
+	LeaseHit LeaseOutcome = iota
+	// LeaseGranted means this caller owns the fill for this key. Nobody else will read the origin
+	// for it until the fill completes or the lease expires.
+	LeaseGranted
+	// LeaseWait means another caller is already filling. The right response is to wait briefly and
+	// look again — and, if that does not resolve, to read the origin directly rather than block.
+	LeaseWait
+)
+
+func (o LeaseOutcome) String() string {
+	switch o {
+	case LeaseHit:
+		return "hit"
+	case LeaseGranted:
+		return "granted"
+	case LeaseWait:
+		return "wait"
+	default:
+		return "unknown"
+	}
+}
+
+// LeaseResult is the answer to GetOrLease.
+type LeaseResult struct {
+	Outcome LeaseOutcome
+
+	// Entry is set only on LeaseHit.
+	Entry Entry
+
+	// Token is set only on LeaseGranted, and must be handed back to FillWithLease.
+	Token string
+}
+
+// GetOrLease reads an entry, or takes the exclusive right to fill it.
+//
+// One round trip decides both, and that is the mechanism rather than an optimisation. Reading and
+// then competing for a lease leaves a window in which every caller has already seen a miss and
+// decided to go to the database; under a stampede that window IS the stampede.
+//
+// A shed read returns LeaseWait, not LeaseGranted. Telling a caller it owns a fill when the breaker
+// never let the request reach the node would hand out an admission right that no node has recorded
+// — and every shed caller would receive one, which is the opposite of bounding origin load. Wait
+// degrades correctly: the caller retries briefly and then reads the origin itself.
+func (c *Client) GetOrLease(ctx context.Context, key string) (LeaseResult, error) {
+	rdb, node, err := c.poolFor(key)
+	if err != nil {
+		return LeaseResult{}, err
+	}
+
+	b := c.breakers.For(node)
+	if !b.Allow() {
+		return LeaseResult{Outcome: LeaseWait}, nil
+	}
+
+	token, err := newLeaseToken()
+	if err != nil {
+		return LeaseResult{}, err
+	}
+
+	res, err := readLease.Run(ctx, rdb, []string{key, leaseKey(key)},
+		token, c.leaseTTL.Milliseconds(),
+	).Slice()
+	if err != nil {
+		b.Failure()
+		return LeaseResult{}, fmt.Errorf("cache: get-or-lease %s: %w", key, err)
+	}
+	b.Success()
+
+	if len(res) == 0 {
+		return LeaseResult{}, fmt.Errorf("cache: get-or-lease %s: %w: empty reply", key, ErrCorruptEntry)
+	}
+	tag, ok := res[0].(int64)
+	if !ok {
+		return LeaseResult{}, fmt.Errorf("cache: get-or-lease %s: %w: tag is %T", key, ErrCorruptEntry, res[0])
+	}
+
+	switch tag {
+	case 1:
+		if len(res) != 7 {
+			return LeaseResult{}, fmt.Errorf("cache: get-or-lease %s: %w: %d fields", key, ErrCorruptEntry, len(res))
+		}
+		entry, err := entryFromLua(res[1:])
+		if err != nil {
+			return LeaseResult{}, fmt.Errorf("cache: get-or-lease %s: %w", key, err)
+		}
+		return LeaseResult{Outcome: LeaseHit, Entry: entry}, nil
+	case 2:
+		return LeaseResult{Outcome: LeaseGranted, Token: token}, nil
+	case 3:
+		return LeaseResult{Outcome: LeaseWait}, nil
+	default:
+		return LeaseResult{}, fmt.Errorf("cache: get-or-lease %s: %w: tag %d", key, ErrCorruptEntry, tag)
+	}
+}
+
+// leaseKey is the lease companion to an entry key.
+//
+// A separate key rather than a field on the entry hash, because a lease must be takeable on a key
+// that has no entry at all — which is the only case that matters.
+func leaseKey(key string) string { return key + "\x00lease" }
+
+// newLeaseToken returns an unguessable token identifying one fill attempt.
+//
+// Random rather than sequential: the token is what stops a filler whose lease expired from
+// releasing the lease its successor now holds, so two attempts on the same key must never collide.
+func newLeaseToken() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("cache: generate lease token: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// LeaseTTL returns the configured lease interval.
+func (c *Client) LeaseTTL() time.Duration { return c.leaseTTL }
 
 // Tombstone marks an entry invalidated at the given version, reporting whether it was applied.
 //

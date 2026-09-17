@@ -33,6 +33,7 @@ type Metrics struct {
 	inFlight  *prometheus.GaugeVec
 	guarantee *prometheus.GaugeVec
 	cacheOps  *prometheus.CounterVec
+	leases    *prometheus.CounterVec
 	origin    prometheus.Counter
 }
 
@@ -74,6 +75,16 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Help:      "Cache operations by op and result. Results: hit, miss, stale, error, ok.",
 		}, []string{"op", "result"}),
 
+		// Lease outcomes are the evidence for the bounded-origin-load claim. "granted" counts fills
+		// admitted; under a stampede it should stay near one per lease interval per key while
+		// "waited" climbs with concurrency. Without this the claim would rest on a benchmark graph
+		// alone, and nothing would notice the day the mechanism stopped working in production.
+		leases: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "lease_outcomes_total",
+			Help:      "Lease outcomes: granted, waited, wait_exhausted, wait_cancelled.",
+		}, []string{"outcome"}),
+
 		origin: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "origin_reads_total",
@@ -87,7 +98,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		}, []string{"setting"}),
 	}
 
-	for _, c := range []prometheus.Collector{m.requests, m.duration, m.inFlight, m.guarantee, m.cacheOps, m.origin} {
+	for _, c := range []prometheus.Collector{m.requests, m.duration, m.inFlight, m.guarantee, m.cacheOps, m.leases, m.origin} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("obs: register collector: %w", err)
 		}
@@ -103,6 +114,12 @@ func (m *Metrics) GuaranteeSetting() *prometheus.GaugeVec { return m.guarantee }
 
 // CacheOps exposes the cache counter for assertions.
 func (m *Metrics) CacheOps() *prometheus.CounterVec { return m.cacheOps }
+
+// Origin exposes the origin-read counter for tests.
+func (m *Metrics) Origin() prometheus.Counter { return m.origin }
+
+// Leases exposes the lease-outcome counter for tests.
+func (m *Metrics) Leases() *prometheus.CounterVec { return m.leases }
 
 // OriginReads exposes the origin counter for assertions.
 func (m *Metrics) OriginReads() prometheus.Counter { return m.origin }
@@ -121,6 +138,14 @@ func (m *Metrics) RecordCacheOp(op, result string) {
 		return
 	}
 	m.cacheOps.WithLabelValues(op, result).Inc()
+}
+
+// RecordLease counts one lease outcome.
+func (m *Metrics) RecordLease(outcome string) {
+	if m == nil {
+		return
+	}
+	m.leases.WithLabelValues(outcome).Inc()
 }
 
 // RecordOriginRead counts one read that reached the database.

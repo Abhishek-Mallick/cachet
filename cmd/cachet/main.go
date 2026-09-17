@@ -98,6 +98,7 @@ func run() error {
 		cc, err := cache.New(ctx, cache.Options{
 			Addresses: cfg.Cache.Addresses,
 			TTL:       cfg.Consistency.EntryTTL,
+			LeaseTTL:  cfg.Cache.Lease.TTL,
 			Breaker:   breakerOptions(cfg.Cache.Breaker),
 		})
 		if err != nil {
@@ -115,11 +116,16 @@ func run() error {
 	}
 
 	eng, err := engine.New(engine.Options{
-		Router:                  router,
-		Shards:                  shards,
-		Cache:                   cacheClient,
-		MaxSessionShards:        cfg.Consistency.MaxSessionShards,
-		MaxAffectedKeys:         cfg.Consistency.MaxAffectedKeys,
+		Router:           router,
+		Shards:           shards,
+		Cache:            cacheClient,
+		MaxSessionShards: cfg.Consistency.MaxSessionShards,
+		MaxAffectedKeys:  cfg.Consistency.MaxAffectedKeys,
+		Leases: engine.NewWaitPolicy(
+			cfg.Cache.Lease.WaitAttempts,
+			cfg.Cache.Lease.WaitBackoff,
+			cfg.Cache.Lease.WaitBackoffMax,
+		),
 		CDCLagBound:             cfg.Consistency.CDCLagBound,
 		MaxClockSkew:            cfg.Consistency.MaxClockSkew,
 		SynchronousInvalidation: cfg.Consistency.SynchronousInvalidation,

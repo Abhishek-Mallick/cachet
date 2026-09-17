@@ -330,6 +330,7 @@ func openCache(ctx context.Context, cfg config.Config) (*cache.Client, error) {
 	return cache.New(ctx, cache.Options{
 		Addresses: cfg.Cache.Addresses,
 		TTL:       cfg.Consistency.EntryTTL,
+		LeaseTTL:  cfg.Cache.Lease.TTL,
 		Breaker: breaker.Options{
 			Window:       cfg.Cache.Breaker.Window,
 			Buckets:      cfg.Cache.Breaker.Buckets,

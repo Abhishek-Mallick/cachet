@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
+	"github.com/Abhishek-Mallick/cachet/internal/obs"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 )
 
@@ -44,7 +47,9 @@ type Cluster struct {
 	Router *storage.Router
 	Cache  *cache.Client
 
-	stop func()
+	stop          func()
+	originReads   func() (int, error)
+	leaseOutcomes func(string) int
 }
 
 // Stop shuts the engine down and waits for it to drain. It is safe to call more than once, so a
@@ -69,6 +74,15 @@ type CacheOptions struct {
 	// test prove that a guarantee holds on the session watermark ALONE, with no invalidation
 	// helping — which is the only way to know which mechanism is actually carrying it.
 	SynchronousInvalidation bool
+
+	// LeaseTTL bounds how long one caller may hold the right to fill a key. Zero takes the client
+	// default.
+	LeaseTTL time.Duration
+
+	// Leases is the wait policy for cache-fill admission. The zero value never waits, which is what
+	// most suites want: it keeps them deterministic and fast, since nothing in them is trying to
+	// provoke a stampede.
+	Leases engine.WaitPolicy
 
 	// MaxAffectedKeys is the conditional-write budget past which exact key resolution is abandoned.
 	// Zero takes the default; a conformance test that wants to observe degradation sets it low
@@ -101,7 +115,11 @@ func StartCachedWith(ctx context.Context, t *testing.T, opts CacheOptions, liste
 	t.Helper()
 
 	EnsureEnvironment(ctx, t)
-	c, err := cache.New(ctx, cache.Options{Addresses: []string{DefaultCacheAddr}, TTL: opts.TTL})
+	c, err := cache.New(ctx, cache.Options{
+		Addresses: []string{DefaultCacheAddr},
+		TTL:       opts.TTL,
+		LeaseTTL:  opts.LeaseTTL,
+	})
 	if err != nil {
 		t.Fatalf("cache.New: %v", err)
 	}
@@ -148,12 +166,21 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		t.Fatalf("router: %v", err)
 	}
 
+	// A private registry per cluster: suites start several engines in one process, and a shared
+	// registry would make one cluster'''s origin reads visible in another'''s assertions.
+	metrics, err := obs.NewMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+
 	eng, err := engine.New(engine.Options{
+		Metrics:                 metrics,
 		Router:                  router,
 		Shards:                  shards,
 		Cache:                   cacheClient,
 		MaxSessionShards:        64,
 		MaxAffectedKeys:         opts.MaxAffectedKeys,
+		Leases:                  opts.Leases,
 		MaxClockSkew:            250 * time.Millisecond,
 		SynchronousInvalidation: opts.SynchronousInvalidation,
 		Version:                 "test",
@@ -187,7 +214,35 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 	}
 	t.Cleanup(stop)
 
-	return &Cluster{Addrs: srv.Addrs(), Shards: shards, Router: router, stop: stop}
+	return &Cluster{
+		Addrs:  srv.Addrs(),
+		Shards: shards,
+		Router: router,
+		stop:   stop,
+		originReads: func() (int, error) {
+			return int(testutil.ToFloat64(metrics.Origin())), nil
+		},
+		leaseOutcomes: func(outcome string) int {
+			return int(testutil.ToFloat64(metrics.Leases().WithLabelValues(outcome)))
+		},
+	}
+}
+
+// LeaseOutcomesForTest reports how many times each lease outcome has occurred.
+//
+// It is what lets a stampede test prove it actually observed a stampede: if no caller ever waited,
+// the readers were serialised and any low origin count says nothing about the lease.
+func (c *Cluster) LeaseOutcomesForTest(outcome string) int {
+	return c.leaseOutcomes(outcome)
+}
+
+// OriginReadsForTest reports how many reads have reached the database.
+//
+// It reads the engine's own counter rather than a test-side tally, so what is asserted is the
+// number the product reports — the same one a benchmark publishes and an operator alerts on. A
+// separate count could agree with the tests and disagree with production.
+func (c *Cluster) OriginReadsForTest() (int, error) {
+	return c.originReads()
 }
 
 // Client dials one of the cluster's listeners.
