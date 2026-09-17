@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
+	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/obs"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
@@ -81,6 +82,11 @@ type Options struct {
 	// With it off, invalidation falls entirely to the CDC tailer — see config.Consistency.
 	SynchronousInvalidation bool
 
+	// Admission decides which keys are worth caching, from their observed read:write ratio. Nil
+	// means cache everything, which is the configuration every benchmark row before this one was
+	// measured with.
+	Admission *admission.Controller
+
 	// Leases bounds origin load per key. The zero value disables waiting entirely: a caller told
 	// another fill is in progress goes straight to the database rather than waiting for it.
 	Leases WaitPolicy
@@ -113,6 +119,7 @@ type Engine struct {
 	maxSessionShards int
 	maxAffectedKeys  int
 	leases           WaitPolicy
+	admission        *admission.Controller
 	cdcLagBound      time.Duration
 	maxClockSkew     time.Duration
 	syncInvalidation bool
@@ -175,6 +182,7 @@ func New(opts Options) (*Engine, error) {
 		maxSessionShards: maxShards,
 		maxAffectedKeys:  maxAffected,
 		leases:           opts.Leases,
+		admission:        opts.Admission,
 		cdcLagBound:      cdcLag,
 		maxClockSkew:     opts.MaxClockSkew,
 		syncInvalidation: opts.SynchronousInvalidation,
@@ -289,6 +297,18 @@ func (e *Engine) fromCacheOrLease(
 ) (cache.Entry, bool, string) {
 	if e.cache == nil || req.Level.BypassesCache() {
 		return cache.Entry{}, false, ""
+	}
+
+	// The read is counted whether or not the key is cacheable. That ordering is what makes
+	// admission reversible: a key that was evicted still accumulates reads, so when its ratio
+	// recovers it can be admitted again. Counting only admitted keys would make eviction a one-way
+	// ratchet, and the first bad hour would cost a key its hit rate permanently.
+	if e.admission != nil {
+		e.admission.RecordRead(key)
+		if !e.admission.ShouldCache(key) {
+			e.metrics.RecordCacheOp("get", "not_admitted")
+			return cache.Entry{}, false, ""
+		}
 	}
 
 	entry, hit, lease := e.readWaitingForAnyFill(ctx, key)
@@ -458,6 +478,14 @@ func (e *Engine) applyFillHoldingLease(ctx context.Context, key string, entry ca
 // mechanism behind read-own-writes for other processes: by the time the caller holds the ack, the
 // stale entry is already invalidated at that version (CONSISTENCY.md §3.2).
 func (e *Engine) invalidate(ctx context.Context, key string, version storage.Version) {
+	// Counted before the early return, and outside the synchronous-invalidation check. A write is a
+	// write whichever path invalidates it, and a key whose writes were only counted when
+	// synchronous invalidation happened to be on would look read-heavy to admission precisely in
+	// the configuration where caching it costs most.
+	if e.admission != nil {
+		e.admission.RecordWrite(key)
+	}
+
 	if e.cache == nil || !e.syncInvalidation {
 		return
 	}

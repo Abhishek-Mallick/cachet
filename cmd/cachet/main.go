@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
+	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/breaker"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
@@ -121,6 +122,7 @@ func run() error {
 		Cache:            cacheClient,
 		MaxSessionShards: cfg.Consistency.MaxSessionShards,
 		MaxAffectedKeys:  cfg.Consistency.MaxAffectedKeys,
+		Admission:        admissionController(cfg.Cache.Admission, log),
 		Leases: engine.NewWaitPolicy(
 			cfg.Cache.Lease.WaitAttempts,
 			cfg.Cache.Lease.WaitBackoff,
@@ -210,6 +212,31 @@ func envMap() map[string]string {
 		}
 	}
 	return out
+}
+
+// admissionController builds the adaptive admission controller, or nil when it is off.
+//
+// Nil rather than a permissive controller, so the disabled path costs nothing at all: no sketch
+// updates, no state, no decision on the read path. A "cache everything" controller would still pay
+// for the bookkeeping it was configured not to use.
+func admissionController(cfg config.Admission, log *slog.Logger) *admission.Controller {
+	if !cfg.Enabled {
+		return nil
+	}
+	log.Info("adaptive admission enabled",
+		"admit_ratio", cfg.AdmitRatio, "evict_ratio", cfg.EvictRatio,
+		"min_samples", cfg.MinSamples, "min_dwell", cfg.MinDwell, "window", cfg.Window)
+
+	return admission.NewController(admission.ControllerOptions{
+		Sketch: admission.NewSketch(admission.SketchOptions{Window: cfg.Window}),
+		Policy: admission.NewPolicy(admission.PolicyOptions{
+			AdmitRatio: cfg.AdmitRatio, EvictRatio: cfg.EvictRatio,
+			MinSamples: cfg.MinSamples, MinDwell: cfg.MinDwell,
+			// A key with too little evidence is cached. It cannot build a read history without
+			// being read, and it cannot be read from a cache it was never admitted to.
+			DefaultAdmit: true,
+		}),
+	})
 }
 
 // breakerOptions maps the validated config onto the cache client's breaker settings.

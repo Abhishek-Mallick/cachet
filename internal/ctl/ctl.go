@@ -12,6 +12,7 @@ package ctl
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/cdc"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
@@ -409,6 +411,53 @@ func (r InvalidateResult) String() string {
 	}
 	return fmt.Sprintf("%s %s\n  cache node  %s\n  shard       %s\n  version     %d\n",
 		verb, r.Key, r.CacheNode, r.Shard, r.Version)
+}
+
+// AdmissionExplanation is why a key is or is not being cached.
+type AdmissionExplanation struct {
+	Key   string  `json:"key"`
+	Admit bool    `json:"admit"`
+	Ratio float64 `json:"read_write_ratio"`
+
+	Reads  uint32 `json:"reads"`
+	Writes uint32 `json:"writes"`
+
+	Reason string `json:"reason"`
+}
+
+// ExplainAdmission reports the admission decision for a key.
+//
+// The command exists because a cache that silently declines to cache a key is indistinguishable
+// from a cache that is broken, and "why is this key not cached?" is the first question anyone asks.
+// A control plane that cannot answer it leaves an operator to guess, and they will guess that
+// something is wrong.
+func ExplainAdmission(c *admission.Controller, key string) (AdmissionExplanation, error) {
+	parsed, err := engine.ParseKey(key)
+	if err != nil {
+		return AdmissionExplanation{}, fmt.Errorf("ctl: %w", err)
+	}
+	canonical := parsed.String()
+
+	d := c.Explain(canonical)
+	reads, writes := c.Counts(canonical)
+	return AdmissionExplanation{
+		Key: canonical, Admit: d.Admit, Ratio: d.Ratio,
+		Reads: reads, Writes: writes, Reason: d.Reason,
+	}, nil
+}
+
+// String renders the explanation for a human.
+func (e AdmissionExplanation) String() string {
+	verdict := "NOT cached"
+	if e.Admit {
+		verdict = "cached"
+	}
+	ratio := fmt.Sprintf("%.1f:1", e.Ratio)
+	if math.IsInf(e.Ratio, 1) {
+		ratio = "read-only"
+	}
+	return fmt.Sprintf("key         %s\nadmission   %s\nread:write  %s (%d reads, %d writes)\nreason      %s\n",
+		e.Key, verdict, ratio, e.Reads, e.Writes, e.Reason)
 }
 
 // NodeHealth is one cache node's reachability.

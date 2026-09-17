@@ -56,6 +56,9 @@ type Shard struct {
 type Cache struct {
 	Addresses []string `koanf:"addresses"`
 
+	// Admission decides which keys are worth caching, from their measured read:write ratio.
+	Admission Admission `koanf:"admission"`
+
 	// Lease bounds origin load per key under a stampede.
 	Lease Lease `koanf:"lease"`
 
@@ -65,6 +68,35 @@ type Cache struct {
 	// what Cachet promises about staleness. A shed read is served from the database, which is at
 	// least as fresh as the cache would have been.
 	Breaker Breaker `koanf:"breaker"`
+}
+
+// Admission configures the per-key read:write admission policy.
+//
+// Tuning knobs, not guarantee settings: admission changes which keys are cached, never what a read
+// is allowed to return. A key that is not admitted is read from the database, which is at least as
+// fresh as the cache would have been.
+type Admission struct {
+	// Enabled turns adaptive admission on. Off by default: every benchmark row recorded before this
+	// existed was measured with everything cached, and silently changing that would make the new
+	// rows incomparable with the old ones.
+	Enabled bool `koanf:"enabled"`
+
+	// AdmitRatio and EvictRatio are two thresholds with a gap between them, and the gap is the
+	// point. Oscillation is the named risk for this mechanism: with a single threshold a borderline
+	// key flips on every sample, and each flip is a wasted fill plus a wasted invalidation — making
+	// the policy strictly worse than caching everything.
+	AdmitRatio float64 `koanf:"admit_ratio"`
+	EvictRatio float64 `koanf:"evict_ratio"`
+
+	// MinSamples is the evidence floor below which a key keeps the default.
+	MinSamples uint32 `koanf:"min_samples"`
+
+	// MinDwell is how long a key holds its state before a change takes effect — the second
+	// anti-oscillation mitigation, covering a key whose ratio swings clean through the band.
+	MinDwell time.Duration `koanf:"min_dwell"`
+
+	// Window is how far back the read:write ratio is measured.
+	Window time.Duration `koanf:"window"`
 }
 
 // Lease configures cache-fill admission: who is allowed to read the origin on a miss, and how long
@@ -208,6 +240,14 @@ func Default() Config {
 			ServiceName:   "cachet",
 		},
 		Cache: Cache{
+			Admission: Admission{
+				Enabled:    false,
+				AdmitRatio: 20,
+				EvictRatio: 10,
+				MinSamples: 50,
+				MinDwell:   30 * time.Second,
+				Window:     time.Minute,
+			},
 			Lease: Lease{
 				TTL:            2 * time.Second,
 				WaitAttempts:   4,
@@ -340,6 +380,9 @@ func (c Config) Validate() error {
 		seenCache[addr] = struct{}{}
 	}
 
+	if err := c.Cache.Admission.validate(); err != nil {
+		return err
+	}
 	if err := c.Cache.Lease.validate(); err != nil {
 		return err
 	}
@@ -356,6 +399,33 @@ func (c Config) Validate() error {
 	}
 	if c.Shutdown.DrainTimeout <= 0 {
 		return fmt.Errorf("config: shutdown.drain_timeout must be positive, got %s", c.Shutdown.DrainTimeout)
+	}
+	return nil
+}
+
+func (a Admission) validate() error {
+	if !a.Enabled {
+		return nil
+	}
+	if a.AdmitRatio <= 0 {
+		return fmt.Errorf("config: cache.admission.admit_ratio must be positive, got %v", a.AdmitRatio)
+	}
+	if a.EvictRatio <= 0 {
+		return fmt.Errorf("config: cache.admission.evict_ratio must be positive, got %v", a.EvictRatio)
+	}
+	if a.EvictRatio > a.AdmitRatio {
+		// This inverts the hysteresis band: a key would be admitted and immediately eligible for
+		// eviction, guaranteeing the oscillation the band exists to prevent. An operator who wrote
+		// it believes something about their system that is not true, so it fails at boot rather
+		// than being quietly corrected.
+		return fmt.Errorf("config: cache.admission.evict_ratio (%v) is above admit_ratio (%v), which "+
+			"inverts the hysteresis band and guarantees oscillation", a.EvictRatio, a.AdmitRatio)
+	}
+	if a.MinDwell < 0 {
+		return fmt.Errorf("config: cache.admission.min_dwell must not be negative, got %s", a.MinDwell)
+	}
+	if a.Window <= 0 {
+		return fmt.Errorf("config: cache.admission.window must be positive, got %s", a.Window)
 	}
 	return nil
 }

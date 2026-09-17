@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
+	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
@@ -74,6 +75,10 @@ type CacheOptions struct {
 	// test prove that a guarantee holds on the session watermark ALONE, with no invalidation
 	// helping — which is the only way to know which mechanism is actually carrying it.
 	SynchronousInvalidation bool
+
+	// Admission decides which keys are worth caching. Nil caches everything, which is what most
+	// suites want: they are testing consistency, not cost.
+	Admission *admission.Controller
 
 	// LeaseTTL bounds how long one caller may hold the right to fill a key. Zero takes the client
 	// default.
@@ -181,6 +186,7 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		MaxSessionShards:        64,
 		MaxAffectedKeys:         opts.MaxAffectedKeys,
 		Leases:                  opts.Leases,
+		Admission:               opts.Admission,
 		MaxClockSkew:            250 * time.Millisecond,
 		SynchronousInvalidation: opts.SynchronousInvalidation,
 		Version:                 "test",
