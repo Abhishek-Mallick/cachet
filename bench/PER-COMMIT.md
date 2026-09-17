@@ -18,4 +18,5 @@
 
 | Commit | Date | ControllerConcurrent<br/><sub>ns/op · allocs/op</sub> | RingLookup<br/><sub>ns/op · allocs/op</sub> | SketchCounts<br/><sub>ns/op · allocs/op</sub> | TokenAdvance<br/><sub>ns/op · allocs/op</sub> | TokenProto<br/><sub>ns/op · allocs/op</sub> |
 |---|---|---|---|---|---|---|
+| `f6895c8` | 2026-09-17 | 1.20µs · 3 | 24.0ns · 0 | 178.3ns · 0 | 38.3ns · 0 | 374.2ns · 2 |
 | `7558abf` | 2026-09-18 | 414.1ns · 3 | 32.0ns · 0 | 90.5ns · 0 | 17.4ns · 0 | 181.3ns · 2 |
