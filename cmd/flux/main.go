@@ -29,6 +29,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/cdc"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/obs"
+	"github.com/Abhishek-Mallick/cachet/internal/storage"
 )
 
 var version = "dev"
@@ -156,29 +157,7 @@ func run() error {
 // The tailer needs host, user and password separately because replication is a different protocol
 // from the query connection, not a different query on it.
 func parseDSN(dsn string) (addr, user, password, database string, err error) {
-	creds, rest, ok := strings.Cut(dsn, "@")
-	if !ok {
-		return "", "", "", "", fmt.Errorf("malformed dsn %q", dsn)
-	}
-	user, password, _ = strings.Cut(creds, ":")
-
-	_, rest, ok = strings.Cut(rest, "(")
-	if !ok {
-		return "", "", "", "", fmt.Errorf("dsn %q has no host", dsn)
-	}
-	addr, rest, ok = strings.Cut(rest, ")")
-	if !ok {
-		return "", "", "", "", fmt.Errorf("dsn %q has no host", dsn)
-	}
-
-	database = strings.TrimPrefix(rest, "/")
-	if i := strings.IndexByte(database, '?'); i >= 0 {
-		database = database[:i]
-	}
-	if database == "" {
-		return "", "", "", "", fmt.Errorf("dsn %q has no database", dsn)
-	}
-	return addr, user, password, database, nil
+	return storage.ParseDSN(dsn)
 }
 
 func envMap() map[string]string {
