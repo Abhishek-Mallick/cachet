@@ -151,16 +151,21 @@ key still all reach the database, which is precisely when you can least afford t
 Asserted on every build: 500 concurrent readers of one invalidated hot key produce **one** origin
 read; with waiting disabled, 198 of 200 reach the database.
 
-### 4 · Sextant — continuous consistency verification 🔭 *(roadmap)*
+### 4 · Sextant — continuous consistency verification 🔭
 
 A verifier that subscribes to the invalidation stream, shadow-reads every cache replica, and detects
 divergence — with **consistency tracing** that records each mutation, so "why was this stale?" has
 an answer instead of a shrug.
 
 This is the piece the category is missing. Sampling monitors tell you a violation happened, some
-minutes later, without telling you why. Sextant is designed to run continuously and keep enough
-state to reconstruct the sequence that caused any divergence it finds — then publish a **measured
-SLO per consistency level**. Not a promise in a document. A live number.
+minutes later, without telling you why. Sextant runs continuously and keeps enough state to
+reconstruct the sequence that caused any divergence it finds, then publishes a **measured SLO per
+consistency level**. Not a promise in a document. A live number.
+
+**Shadow mode** is the part worth trying first: point it at a deployment your application is not
+reading through, and it reports what your consistency *would have been* — no code change, no risk.
+It never mutates the cache it observes, which is asserted by a test and enforced by the type it is
+given.
 
 ---
 

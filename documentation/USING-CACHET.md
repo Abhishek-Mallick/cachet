@@ -16,9 +16,10 @@
 | CDC tailer — MySQL binlog → invalidation, durable checkpoints | `flux` | ✅ Working |
 | Benchmark driver — open-loop, Zipfian, staleness probe, report generator | `benchctl` | ✅ Working |
 | Operator CLI — status, ring, inspect, invalidate, checkpoint | `cachetctl` | ✅ Working |
-| Consistency verifier | `sextant` | ⬜ Roadmap |
+| Consistency verifier, incl. shadow mode | `sextant` | ✅ Working |
 | Independent cache ring + proportional circuit breaker | (in `cachet`) | ✅ Working |
 | Leases — bounded origin load per key under a stampede | (in `cachet`) | ✅ Working |
+| Adaptive per-key admission | (in `cachet`) | ✅ Working |
 | Go SDK — carries the session, propagates it via OTel baggage | `pkg/cachet` | ✅ Working |
 
 ---
@@ -325,6 +326,86 @@ names.
 Commands that would need Sextant (`key trace`) or adaptive admission (`admission explain`) are
 **absent rather than stubbed**. A control plane that answers "why was this stale?" with a placeholder
 is worse than one that admits it cannot answer yet.
+
+---
+
+## Verifying your consistency — `sextant`
+
+```bash
+sextant -config cachet.yaml            # verify a live deployment
+sextant -config cachet.yaml -shadow    # observe only: what consistency WOULD have been
+```
+
+**Start with `-shadow`.** It runs the same detection and tracing loops against a deployment your
+application is not reading through, so you get a number for your own traffic without changing a line
+of code. It never writes to the cache — that is asserted by a test and enforced by the read-only
+type it is handed.
+
+It exports per consistency level, on `observability.metrics_listen`:
+
+| Metric | Meaning |
+|---|---|
+| `cachet_sextant_consistency_nines{level}` | Measured consistency, in nines |
+| `cachet_sextant_observations{level}` | Evidence count. **Zero means the figure above is not a measurement** |
+| `cachet_sextant_violations{level}` | Violations in the current window |
+| `cachet_sextant_shadow_mode` | 1 when observing a deployment serving no traffic |
+
+Read the observation count beside the nines. A verifier that has looked at nothing is not at 100%;
+it has no evidence, and the two must not look the same on a dashboard.
+
+A violation is logged with the trace that explains it, which is the difference between knowing a key
+was stale and knowing why:
+
+```
+entities:9980001 on shard1: cache fv=117287293673472000, db=117287293673537536,
+behind 1m0s, violates [EVENTUAL]
+  trace: 16:21:13.877 fill      v=1 src=read_fill actor=engine-1
+  trace: 16:21:13.877 tombstone v=2 src=cdc actor=shard1
+```
+
+> **What counts as a violation** is `CONSISTENCY.md` §7, exactly: an entry behind the database for
+> longer than the propagation bound, where that bound is *summed from your own guarantee settings*
+> rather than tuned. An entry behind for less than that is an in-flight race, which the model never
+> promised otherwise about.
+
+---
+
+## Deciding what to cache — adaptive admission
+
+Off by default. When enabled, Cachet measures each key's read:write ratio and stops caching keys that
+do not earn it — a write-churning key in a read-heavy table pays invalidation on every write and
+misses on every read.
+
+```yaml
+cache:
+  admission:
+    enabled: true
+    admit_ratio: 20      # cache a key at or above 20:1 reads:writes
+    evict_ratio: 10      # stop caching below 10:1
+    min_samples: 50      # evidence floor; below this a key keeps the default
+    min_dwell: 30s       # how long a key holds its state before a change takes effect
+    window: 1m           # how far back the ratio is measured
+```
+
+**The gap between the two ratios is the point**, not sloppiness. With a single threshold a borderline
+key flips on every sample, and each flip is a wasted fill plus a wasted invalidation — making the
+policy strictly worse than caching everything. `evict_ratio` above `admit_ratio` is refused at boot,
+because it inverts the band and guarantees that.
+
+```bash
+cachetctl admission explain entities:1
+```
+
+```
+key         entities:1
+admission   NOT cached
+read:write  1.0:1 (100 reads, 100 writes)
+reason      1.0:1 read:write is below the 10:1 evict threshold; every write pays
+            invalidation and every read misses
+```
+
+Admission changes **who pays**, never what a read returns: an uncached read is served from the
+database, which is at least as fresh as the cache would have been.
 
 ---
 

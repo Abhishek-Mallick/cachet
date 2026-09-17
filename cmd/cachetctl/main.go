@@ -38,6 +38,7 @@ commands:
   inspect <key>              where a key lives, and what the cache holds for it
   invalidate <key>           tombstone one key by hand (use -dry-run first)
   checkpoint                 each shard's durable CDC tailer position
+  admission explain <key>    why a key is or is not being cached
 
 every command accepts -config <path> and -json.
 `

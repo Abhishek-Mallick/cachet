@@ -69,9 +69,9 @@ Precise invalidation is the foundation. Everything below is what it makes possib
 |---|---|---|---|---|
 | Invalidation | CDC + **exact write-path** | Streaming dataflow | Heuristic | Hand-rolled |
 | Consistency | **Read-own-writes, tiered** | Eventual | Probabilistic | Undefined |
-| **Measured correctness** | **Live SLO** <sub>roadmap</sub> | ❌ | ❌ | ❌ |
+| **Measured correctness** | ✅ **Live SLO** | ❌ | ❌ | ❌ |
 | Stampede protection | ✅ **Leases** | Partial | ❌ | ❌ |
-| Self-tuning admission | **Per-key r:w** <sub>roadmap</sub> | ❌ manual | Heuristic | ❌ |
+| Self-tuning admission | ✅ **Per-key r:w** | ❌ manual | Heuristic | ❌ |
 
 **Every cache on that list asks you to trust it. Cachet is the only one that proves it.**
 
@@ -109,17 +109,20 @@ Waiting is bounded, and a caller that gives up reads the origin itself. A lease 
 indistinguishable from one nearly finished, so waiting longer is a guess — and guessing wrong on the
 hottest key in the system is a self-inflicted outage worse than the stampede.
 
-### Adaptive admission — no human decides what to cache <sub>`roadmap`</sub>
+### Adaptive admission — no human decides what to cache
 
 Cachet tracks the observed read:write ratio **per key** with a count-min sketch, and caches only
-what earns it.
+what earns it. Two thresholds rather than one — admitted at 20:1, evicted below 10:1 — so a
+borderline key sits still instead of flipping. A test drives a key across that band for 200 rounds
+and requires **zero** state changes, because each flip would be a wasted fill plus a wasted
+invalidation: a policy that oscillates is strictly worse than caching everything.
 
 The usual approach is a person picking tables and a rule of thumb about read:write ratios. But
 ratios aren't uniform within a table and they drift. A write-churning key in an otherwise read-heavy
 table is pure cost: every write pays invalidation, every read misses. Cachet finds those keys and
 stops caching them, continuously.
 
-### Sextant — continuous consistency verification 🔭 <sub>`roadmap`</sub>
+### Sextant — continuous consistency verification 🔭
 
 A verifier that subscribes to the invalidation stream, shadow-reads every cache replica, and detects
 divergence — with **consistency tracing** that records each mutation, so "why was this stale?" has
@@ -226,13 +229,16 @@ consistency conformance suite.
 | | Operator CLI (`cachetctl`) — health, routing, key inspection, manual invalidation | ✅ |
 | | Prometheus metrics and a provisioned Grafana dashboard | ✅ |
 | | Leases — origin load per key bounded regardless of concurrency | ✅ |
-| **Roadmap** | Adaptive per-key admission driven by observed read:write ratio | ⬜ |
-| | Sextant — continuous consistency verification and a live SLO per level | ⬜ |
-| | Shadow mode — measure your consistency before changing any application code | ⬜ |
+| | Adaptive per-key admission driven by observed read:write ratio | ✅ |
+| | Sextant — continuous consistency verification, with a live SLO per level | ✅ |
+| | Shadow mode — measure your consistency before changing any application code | ✅ |
+| **Roadmap** | Gossiped admission state across engine instances | ⬜ |
+| | Published benchmark numbers on dedicated hardware | ⬜ |
 
-**On the roadmap items:** they are described above because they are what Cachet is *for* — the
-reasons the architecture is shaped the way it is. They are not implemented yet, and nothing in this
-repository pretends otherwise.
+**On the benchmark row:** four configurations have working implementations and no published figure.
+They stay blank until they can be measured on a host that is not a laptop VM — filling them from a
+noisy machine would produce numbers that look like measurements and are artefacts. The capability
+claims below rest on tests that run on every build, not on that table.
 
 ## Guarantees, and how they are checked
 
