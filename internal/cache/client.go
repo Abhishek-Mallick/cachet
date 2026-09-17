@@ -128,13 +128,29 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 	}
 	for _, addr := range router.Nodes() {
 		rdb := redis.NewClient(&redis.Options{
-			Addr:         addr,
-			DialTimeout:  2 * time.Second,
+			Addr: addr,
+
+			// Bounded by the SAME timeout as reads and writes. It used to be a hardcoded two
+			// seconds, which quietly made Options.Timeout's promise — "bounds a single cache
+			// operation" — false: an operation could spend far longer than the configured budget
+			// establishing a connection it was never going to get.
+			//
+			// This matters most exactly where the cache is supposed to help. The circuit breaker
+			// exists to stop paying timeouts to a node that will not answer; an unbounded dial
+			// undercuts the saving and hides it, because nothing measures the part that overran.
+			DialTimeout:  timeout,
 			ReadTimeout:  timeout,
 			WriteTimeout: timeout,
-			PoolSize:     64,
+
+			// The breaker owns retry policy, so the driver must not have one of its own. With
+			// go-redis' default of three retries, a single Get against a dead node costs several
+			// dial timeouts back to back, and the breaker still records it as ONE failure — so the
+			// shed rate is computed from a cost model that understates reality by a factor of four.
+			MaxRetries: -1,
+
+			PoolSize: 64,
 		})
-		if err := rdb.Ping(ctx).Err(); err != nil {
+		if err := pingWithin(ctx, rdb, bootProbeBudget); err != nil {
 			_ = rdb.Close()
 			_ = c.Close()
 			return nil, fmt.Errorf("cache: ping %s: %w", addr, err)
@@ -142,6 +158,30 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 		c.pools[addr] = rdb
 	}
 	return c, nil
+}
+
+// bootProbeBudget is how long New will keep trying to reach one node before giving up on it.
+//
+// Boot and the request path want opposite things from a retry. A request must fail fast and fall
+// through to the database; a boot probe against a cache that is still warming up should not turn a
+// slow start into a failed deployment. So the dial stays bounded by the operation timeout and this
+// budget bounds the RETRYING instead — which is what keeps a mistyped address from presenting as a
+// thirty-second hang.
+const bootProbeBudget = 2 * time.Second
+
+// pingWithin retries a ping until it succeeds or the budget expires, returning the last error.
+func pingWithin(ctx context.Context, rdb *redis.Client, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	var err error
+	for {
+		if err = rdb.Ping(ctx).Err(); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // poolFor returns the connection pool for the node that owns key, and the node's name.

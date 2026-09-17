@@ -95,6 +95,10 @@ func keysOn(t *testing.T, r *cache.Router, node string, n int) []string {
 	return out
 }
 
+// blackholeAddr is TEST-NET-3 (RFC 5737): reserved, unrouteable, and it drops packets rather than
+// refusing them — the behaviour a stopped container has on a Linux host.
+const blackholeAddr = "203.0.113.1:6379"
+
 func fastBreaker() breaker.Options {
 	return breaker.Options{
 		Window:       10 * time.Second,
@@ -324,4 +328,51 @@ func TestHealthyNodesAreNeverShed(t *testing.T) {
 			t.Errorf("healthy node %s is being shed at %.3f: %+v", node, s.ShedRate, s)
 		}
 	}
+}
+
+// TestConnectingToAnUnreachableNodeFailsQuickly pins a bound that was missing entirely.
+//
+// The connection pool hardcoded a 2-second dial timeout while ReadTimeout and WriteTimeout honoured
+// the configured value, and go-redis retried internally on top of that. One attempt against a node
+// that BLACKHOLES packets therefore cost tens of seconds — measured at ~30 s before this fix.
+//
+// Two things were wrong with that, and neither is test-only:
+//
+//   - An engine with one mistyped cache address hangs for half a minute before saying so. Boot
+//     failures must be fast and legible; a slow one reads as a hang.
+//   - Options.Timeout documents that it "bounds a single cache operation". It did not. The whole
+//     argument for the circuit breaker is that it stops paying timeouts to a node that will not
+//     answer, and an unbounded dial undercuts exactly that.
+//
+// 203.0.113.1 is TEST-NET-3 (RFC 5737): reserved, unrouteable, and it DROPS packets rather than
+// refusing them — the behaviour a stopped container has on a Linux host. A stopped container
+// refuses fast on Docker Desktop, which is why this cost was invisible on a laptop and showed up
+// in CI.
+func TestConnectingToAnUnreachableNodeFailsQuickly(t *testing.T) {
+	ctx := context.Background()
+	addrs, _ := startPair(t)
+
+	const timeout = 200 * time.Millisecond
+	start := time.Now()
+	c, err := cache.New(ctx, cache.Options{
+		Addresses: append(addrs, blackholeAddr),
+		TTL:       time.Hour,
+		Timeout:   timeout,
+		Breaker:   fastBreaker(),
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		_ = c.Close()
+		t.Fatal("cache.New succeeded with an unreachable node in the ring; a client that boots with " +
+			"part of its ring dead routes that share of the key space into errors")
+	}
+
+	// Generous headroom over the configured timeout: the assertion is that a bound EXISTS, not that
+	// it is tight. Before the fix this took roughly thirty seconds.
+	if elapsed > 5*time.Second {
+		t.Errorf("cache.New took %s to report an unreachable node with a %s timeout configured; "+
+			"the dial is not bounded by the operation timeout", elapsed, timeout)
+	}
+	t.Logf("boot failed in %s: %v", elapsed.Round(time.Millisecond), err)
 }

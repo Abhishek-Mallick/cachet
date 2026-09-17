@@ -20,29 +20,34 @@ jobs:
     name: fmt · vet · lint · tidy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: "${{ env.GO_VERSION }}", cache: true }
       # Asserts that running `go mod tidy` changes nothing, rather than that the working tree
       # matches HEAD — the latter also fails on any legitimate uncommitted dependency change.
       - name: go mod tidy is a no-op
         run: make tidy
-      - uses: golangci/golangci-lint-action@v6
-        with: { version: v2.13.2, args: "--timeout=5m --build-tags=integration,e2e,chaos" }
+      # install-only: the action installs golangci-lint and nothing else, and `make lint` runs it.
+      # CI therefore executes the EXACT command a developer runs locally, including the build tags.
+      # When the action owned the invocation, its args and the Makefile's could drift apart, and the
+      # first anyone would know is a lint failure that does not reproduce on a laptop.
+      - uses: golangci/golangci-lint-action@v9
+        with: { version: v2.13.2, install-only: true }
+      - name: vet + lint
+        run: make lint
       # `golangci-lint fmt` has no --diff mode, so formatting is checked by running it and asserting
-      # nothing changed. Ordering matters: this must come after `run`, since fmt rewrites files.
+      # nothing changed. Ordering matters: this must come after linting, since fmt rewrites files.
       - name: formatting is clean
         run: |
           golangci-lint fmt ./...
           git diff --exit-code
-      - run: go vet ./...
 
   unit:
     name: unit · race · leak
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: "${{ env.GO_VERSION }}", cache: true }
       # -count=2 is deliberate: it catches tests that only pass because of
       # state left behind by their first run. Build plan §7.2.
@@ -58,8 +63,8 @@ jobs:
           - { goos: linux,  goarch: arm64 }
           - { goos: darwin, goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: "${{ env.GO_VERSION }}", cache: true }
       - env: { GOOS: "${{ matrix.goos }}", GOARCH: "${{ matrix.goarch }}" }
         run: make build
@@ -68,8 +73,8 @@ jobs:
     name: integration · testcontainers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: "${{ env.GO_VERSION }}", cache: true }
       - run: make test-integration
 
@@ -77,8 +82,8 @@ jobs:
     name: env-up under 90s
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: "${{ env.GO_VERSION }}", cache: true }
       # The 90-second budget is the top of the adoption funnel (build plan §6.1).
       # If it drifts, adoption drops and nobody notices. So it is a CI failure.
@@ -99,7 +104,7 @@ jobs:
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with: { go-version: "${{ env.GO_VERSION }}", cache: true }
       - run: make vuln

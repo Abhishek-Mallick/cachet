@@ -13,6 +13,9 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
+	"go.uber.org/goleak"
 
 	"github.com/Abhishek-Mallick/cachet/internal/cdc"
 )
@@ -42,22 +45,134 @@ func (r *recordingInvalidator) versionOf(key string) uint64 {
 	return r.seen[key]
 }
 
-// shardDSN points at the compose environment. The tailer needs a REAL binlog: there is no
-// meaningful way to fake replication, and a mocked one would test the mock.
-const shardDSN = "root:cachet@tcp(127.0.0.1:3316)/cachet?parseTime=true&interpolateParams=true"
+func TestMain(m *testing.M) {
+	code := m.Run()
+	tearDownShardContainer()
+	if code == 0 {
+		if err := goleak.Find(
+			// testcontainers' reaper client keeps a background connection for the process lifetime.
+			goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),
+			goleak.IgnoreAnyFunction("github.com/testcontainers/testcontainers-go.(*Reaper).connect.func1"),
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "goroutine leak: %v\n", err)
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+// tearDownShardContainer stops the container the package started.
+//
+// It builds its own context rather than taking a test's: teardown has to run after a failed or
+// cancelled run, and a cancelled context would abandon the container to the reaper.
+func tearDownShardContainer() {
+	if shardTC == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = shardTC.Terminate(ctx)
+}
+
+// The tailer needs a REAL binlog: there is no meaningful way to fake replication, and a mocked one
+// would test the mock. It gets one from a container this suite owns, NOT from the compose stack.
+//
+// That distinction is the tier contract in test/README.md: integration tests run against
+// testcontainers and must be self-contained, while the compose stack belongs to the e2e tier.
+// Pointing these at 127.0.0.1:3316 made them pass on a developer machine with `make env-up`
+// running and fail in CI, where nothing had brought that stack up — a suite that only works on the
+// machine that wrote it.
+var (
+	shardOnce sync.Once
+	shardHost string
+	shardDSN  string
+	shardTC   testcontainers.Container
+	shardErr  error
+)
+
+// shardEndpoint starts the MySQL container once for the package and returns its address and DSN.
+//
+// It mounts the SAME my.cnf the compose environment uses, which already enables ROW binlog with a
+// FULL row image — so this also proves that configuration produces a tailable stream, rather than
+// testing a convenient fiction.
+func shardEndpoint(t *testing.T) (host, dsn string) {
+	t.Helper()
+
+	shardOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		shardHost, shardDSN, shardTC, shardErr = startBinlogContainer(ctx)
+	})
+	if shardErr != nil {
+		// Fatal rather than a skip. A suite that quietly skips when its dependencies are missing
+		// stops protecting anything the first time someone forgets a step, and the CI gate would go
+		// green while testing nothing (test/README.md).
+		t.Fatalf("start the binlog shard container: %v", shardErr)
+	}
+	_ = shardTC
+	return shardHost, shardDSN
+}
+
+func startBinlogContainer(ctx context.Context) (host, dsn string, c testcontainers.Container, err error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", "", nil, fmt.Errorf("getwd: %w", err)
+	}
+	repoRoot := cwd + "/../.."
+
+	req := testcontainers.ContainerRequest{
+		Image:        "percona/percona-server:8.0",
+		ExposedPorts: []string{"3306/tcp"},
+		Cmd:          []string{"--defaults-extra-file=/etc/my.cnf.d/cachet.cnf", "--server-id=1"},
+		Env: map[string]string{
+			"MYSQL_ROOT_PASSWORD": "cachet",
+			"MYSQL_DATABASE":      "cachet",
+		},
+		Files: []testcontainers.ContainerFile{
+			{
+				HostFilePath:      repoRoot + "/test/env/mysql/my.myrocks.cnf",
+				ContainerFilePath: "/etc/my.cnf.d/cachet.cnf",
+				FileMode:          0o644,
+			},
+			{
+				HostFilePath:      repoRoot + "/test/fixtures/schema/entities.sql",
+				ContainerFilePath: "/docker-entrypoint-initdb.d/01-schema.sql",
+				FileMode:          0o644,
+			},
+		},
+		WaitingFor: wait.ForLog("port: 3306  Percona Server").WithStartupTimeout(120 * time.Second),
+	}
+
+	tc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req, Started: true,
+	})
+	if err != nil {
+		return "", "", nil, fmt.Errorf("start container: %w", err)
+	}
+
+	h, err := tc.Host(ctx)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("container host: %w", err)
+	}
+	port, err := tc.MappedPort(ctx, "3306/tcp")
+	if err != nil {
+		return "", "", nil, fmt.Errorf("mapped port: %w", err)
+	}
+
+	addr := fmt.Sprintf("%s:%s", h, port.Port())
+	return addr, fmt.Sprintf("root:cachet@tcp(%s)/cachet?parseTime=true&interpolateParams=true", addr), tc, nil
+}
 
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	db, err := sql.Open("mysql", shardDSN)
+	_, dsn := shardEndpoint(t)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if err := db.PingContext(context.Background()); err != nil {
-		// Deliberately fatal rather than a skip. A suite that quietly skips when its dependencies
-		// are missing stops protecting anything the first time someone forgets a step, and the CI
-		// gate would go green while testing nothing (test/README.md).
-		t.Fatalf("shard0 is not reachable (%v); run `make env-up` before the integration suite", err)
+		t.Fatalf("the shard container is not reachable: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -66,9 +181,10 @@ func openDB(t *testing.T) *sql.DB {
 func startTailer(ctx context.Context, t *testing.T, inv cdc.Invalidator, serverID uint32, cp cdc.Checkpoint) *cdc.Tailer {
 	t.Helper()
 
+	addr, _ := shardEndpoint(t)
 	tailer, err := cdc.New(cdc.Options{
 		ShardID:         "shard0",
-		Addr:            "127.0.0.1:3316",
+		Addr:            addr,
 		User:            "root",
 		Password:        "cachet",
 		Database:        "cachet",

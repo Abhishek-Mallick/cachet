@@ -62,6 +62,20 @@ func newClient(ctx context.Context, t *testing.T) *cache.Client {
 	if err != nil {
 		t.Fatalf("cache.New: %v", err)
 	}
+
+	// Every test starts from an empty cache.
+	//
+	// The container is shared across the package to avoid paying startup per test, and these tests
+	// use fixed keys at fixed versions — so without this, the SECOND run under `-count=2` finds
+	// `cas:empty` already at version 100 and the compare-and-set correctly rejects the re-fill. The
+	// test then fails for the one reason that is not a bug: the invariant working.
+	//
+	// That is exactly what -count=2 exists to catch (build plan §7.2), and it caught it. The fix
+	// belongs here rather than in the flag: a test that only passes on a pristine container is a
+	// test that will eventually pass for the wrong reason.
+	if err := c.Flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 	t.Cleanup(func() {
 		if err := c.Close(); err != nil {
 			t.Errorf("Close: %v", err)
