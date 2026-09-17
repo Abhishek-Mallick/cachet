@@ -1,0 +1,15 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "index",
+    "what-is-cachet",
+    "quickstart",
+    "---Using Cachet---",
+    "sdk",
+    "consistency",
+    "operations",
+    "---Reference---",
+    "configuration",
+    "verifying"
+  ]
+}

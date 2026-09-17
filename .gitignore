@@ -43,3 +43,10 @@ bench/results/
 .idea/
 .vscode/
 *.swp
+
+# Docs site build output. The site is source; its artefacts are not.
+web/node_modules/
+web/.next/
+web/.source/
+web/out/
+web/next-env.d.ts

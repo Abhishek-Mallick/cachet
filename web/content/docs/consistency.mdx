@@ -1,0 +1,72 @@
+---
+title: Consistency
+description: Four levels, chosen per request — and what each one actually promises.
+---
+
+## The levels
+
+| Level | Guarantee | Use for |
+|---|---|---|
+| `STRONG` | Bypasses the cache entirely | Money, auth |
+| `SESSION` *(default)* | Read-own-writes + monotonic reads | Almost everything |
+| `BOUNDED(t)` | Staleness ≤ t, measured from **commit** | Feeds, counts, listings |
+| `EVENTUAL` | Best effort | Recommendations |
+
+Riak offered per-request tunable consistency and the industry dropped it. It should not have.
+
+## The part that makes SESSION affordable
+
+A session watermark is checked against the **fill version** — the database state an entry was filled
+from — not the row's own version.
+
+That sounds like an implementation detail and is the opposite. Watermarking on the row version
+collapses the hit rate to near zero on any shard taking writes, because every entry looks stale
+relative to the newest write anywhere on that shard. Watermarking on the fill version asks the
+question that actually matters: *is the snapshot behind this entry new enough for what this session
+has already seen?*
+
+The payoff is testable and surprising: **read-own-writes holds with no invalidation at all**, carried
+entirely by the watermark.
+
+## What SESSION does not promise
+
+- **Not read-others-writes.** Another session's write, committed 5ms ago, may not be visible to you.
+- **Not writes-follow-reads.** Your writes are not ordered against values you have read.
+- **Not a snapshot across keys.** Two keys in one `BatchGet` may reflect different instants — at
+  every level. Cachet caches rows, not transactions.
+- **Scoped to the token's lifetime.** Lose the token, lose the guarantee. This is the sharpest edge
+  in the model and it is stated rather than hidden.
+
+## How invalidation actually works
+
+Two paths, deliberately separable so neither takes credit for the other's work.
+
+**On the write path**, after commit and before the acknowledgement. By the time your write returns,
+the stale entry is already gone. A conditional write resolves its affected rows *inside the
+transaction* with `SELECT … FOR UPDATE` — resolving before it would leave a window where a row joins
+or leaves the predicate, and the write would touch a row nobody invalidated.
+
+**From the binlog**, as a backstop, and as the only path that catches writes made straight to the
+database by a migration or an admin script.
+
+Both are versioned compare-and-set, so replaying the binlog is idempotent and a restarted tailer
+cannot undo newer state. The difference between them is entirely in the tail:
+
+| Invalidation path | p50 | p90 | p99 | p99.9 |
+|---|---|---|---|---|
+| Binlog only | 5.60 ms | 14.53 ms | 34.98 ms | 101.50 ms |
+| Write path + binlog backstop | 6.28 ms | 9.80 ms | 17.41 ms | **26.05 ms** |
+
+CDC adds a variable delivery delay; synchronous invalidation is bounded by the write it rides on.
+
+## How the guarantees are checked
+
+Every level's promise — **and every documented non-promise** — is executed as a cell of a conformance
+matrix across all four levels, on every build.
+
+```bash
+make test-consistency
+```
+
+The suite also runs the invalidation-dependent cells against a deliberately naive cache and
+**requires them to fail**. A consistency test that has never failed is proving nothing.

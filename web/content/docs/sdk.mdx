@@ -1,0 +1,116 @@
+---
+title: The Go SDK
+description: cachet-go — reads, writes, and carrying a session across service boundaries.
+---
+
+```bash
+go get github.com/Abhishek-Mallick/cachet/pkg/cachet
+```
+
+The SDK is mandatory, and that is a feature rather than a limitation.
+
+Cachet's session guarantee is carried by a token, and **a token nobody propagates is a guarantee
+nobody has**. On raw gRPC you would thread a watermark through every call and every service hop by
+hand; the ones you forgot would not fail — they would quietly return staler data than the level you
+asked for, on exactly the requests where it mattered. The client carries it so "I forgot" is not a
+reachable state.
+
+## Connecting
+
+```go
+c, err := cachet.Dial(ctx, "unix:///var/run/cachet.sock")
+defer c.Close()
+```
+
+`Dial` performs the protocol handshake, so an incompatible server is a **startup** error rather than
+a confusing failure on whichever request first touches the field that changed.
+
+Options:
+
+```go
+cachet.WithDefaultLevel(consistency.Bounded)
+cachet.WithMaxSessionShards(64)
+cachet.WithDialOptions(grpc.WithUnaryInterceptor(...))
+```
+
+## Reading
+
+```go
+got, err := c.Get(ctx, "entities:1")                                   // the client's default level
+got, err = c.Get(ctx, "entities:1", cachet.AtLevel(consistency.Strong))
+got, err = c.Get(ctx, "entities:1", cachet.WithinStaleness(2*time.Second))
+
+if got.Found {
+    use(got.Record.Payload)
+}
+```
+
+`Found == false` is an **answer**, not an error: absence is a cacheable fact, and a workload probing
+for missing rows does not bypass the cache.
+
+### Always check `Degraded`
+
+```go
+if got.Meta.Degraded {
+    log.Warn("served below the requested level", "reason", got.Meta.DegradedReason)
+}
+```
+
+You may ignore it. It must be a decision, not an accident — a silent downgrade of a stated guarantee
+is the failure this whole project exists to remove.
+
+## Writing
+
+```go
+res, err := c.Put(ctx, "entities:1", cachet.Record{TenantID: 1, Payload: body})
+existed, res, err := c.Delete(ctx, "entities:1")
+```
+
+### Conditional writes
+
+```go
+res, err := c.UpdateWhere(ctx, cachet.Predicate{TenantID: 1, MatchStatus: 1, SetStatus: 2})
+
+if res.Degraded {
+    // Too many rows to resolve exactly. The WRITE committed; what was given up is the exact key
+    // list. Your own reads stay correct; other sessions see these keys as
+    // BOUNDED(res.EffectiveStalenessBound) until the CDC tailer catches up.
+}
+```
+
+`res.AffectedKeys` is exact when `Degraded` is false and **empty** when it is true — never partial.
+A partial list would leave you unable to tell which rows still need treating as stale, which is the
+one thing the field is for.
+
+## Crossing a service boundary
+
+The watermark travels in **OpenTelemetry baggage**, which every instrumented transport already
+propagates. A bespoke header would mean teaching every hop about Cachet first — and the hops nobody
+remembered would silently downgrade the caller.
+
+```go
+// Upstream, before calling another service:
+ctx = cachet.ContextWithSession(ctx, client.Session())
+ctx, err = cachet.InjectSession(ctx)
+
+// Downstream, on an inbound request:
+if w, ok := cachet.ExtractSession(ctx); ok {
+    client.AdoptSession(w)   // merges, never replaces — your own writes still count
+}
+```
+
+Without this, the downstream starts with an empty session and reads as if it had written nothing.
+That is documented behaviour rather than a bug, but it is a weaker guarantee than the one you asked
+for.
+
+<Callout title="Per-request sessions">
+  A session on the **context** wins over the client's own. That is how a server handling work for
+  many callers scopes a guarantee to one request instead of leaking one caller's watermark into
+  another's read.
+</Callout>
+
+## Other languages
+
+There is no npm or pip package today. The contract is gRPC (`cachet.v1`), so generate a client from
+`api/cachet/v1/cachet.proto` — and port the session-token handling first. See
+[What Cachet is](/docs/what-is-cachet#is-there-an-npm-or-pip-package).

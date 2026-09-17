@@ -1,0 +1,91 @@
+---
+title: Verifying consistency
+description: Sextant — what it measures, how to read it, and why shadow mode comes first.
+---
+
+Every other cache in this category asks to be trusted. Sextant is the part that lets Cachet be
+checked.
+
+```bash
+sextant -config cachet.yaml            # verify a live deployment
+sextant -config cachet.yaml -shadow    # observe only
+```
+
+## Start with shadow mode
+
+Shadow mode runs the same detection and tracing loops against a deployment your application is **not**
+reading through, so you get a consistency number for your own traffic without changing a line of
+code.
+
+It never writes to the cache. That is asserted by a test and enforced by the read-only type it is
+handed — a verifier that repaired the staleness it found would both break the "nothing changes"
+promise and destroy its own evidence.
+
+Measured on a healthy stack it reports `1.000000` across all three cache-reading levels; against a
+cache with invalidation disabled, 200 violations in 200 checks. Both matter: a verifier that reports
+100% on a healthy system *and* on a broken one is a verifier that reports 100%.
+
+## What counts as a violation
+
+> A cache entry whose fill version is behind the database, **and which has stayed that way for longer
+> than the propagation bound**.
+
+The second clause is the whole difficulty. An entry momentarily behind while an invalidation is in
+flight is **not** a violation — the model never promised instantaneous propagation to other sessions.
+One still behind after the bound is, because something was dropped, reordered or lost.
+
+The bound is **summed from your own configuration** — write-path budget + CDC lag bound + max clock
+skew — not tuned by hand. A hand-picked threshold would drift from the guarantee the moment anyone
+changed a setting, and nothing would report the drift.
+
+Getting that line wrong destroys the product in either direction. Too tight and every healthy system
+reports violations until nobody opens the dashboard. Too loose and real staleness reads as healthy,
+which is worse than shipping no verifier at all because it arrives with a reassuring green number.
+
+## Per level, never blended
+
+| Level | Counts as a violation when |
+|---|---|
+| `STRONG` | **Never.** It does not read the cache — a stale `STRONG` read is a database bug |
+| `SESSION` | An entry below the session's observed watermark was servable |
+| `BOUNDED(t)` | An entry older than `t` + max clock skew was servable |
+| `EVENTUAL` | An entry never converged within the bound |
+
+A blended number would average a level that bypasses the cache with one promising only eventual
+convergence, and describe no promise Cachet actually makes.
+
+## Reading the metrics
+
+| Metric | Meaning |
+|---|---|
+| `cachet_sextant_consistency_nines{level}` | Measured consistency, in nines |
+| `cachet_sextant_observations{level}` | Evidence count |
+| `cachet_sextant_violations{level}` | Violations in the current window |
+| `cachet_sextant_shadow_mode` | 1 when observing a deployment serving no traffic |
+
+<Callout type="warn" title="Read the observation count beside the nines">
+  Zero observations is **not** 100% consistency — it is no evidence, and the two must never look the
+  same on a dashboard. A verifier that scores itself perfect before looking at anything is the most
+  misleading thing this component could do.
+
+  A clean window uses the rule of three: zero failures in *n* trials bounds the rate at 3/n, so the
+  figure never claims more reliability than the sample size supports.
+</Callout>
+
+## A violation explains itself
+
+```
+entities:9980001 on shard1: cache fv=117287293673472000, db=117287293673537536,
+behind 1m0s, violates [EVENTUAL]
+  trace: 16:21:13.877 fill      v=1 src=read_fill actor=engine-1
+  trace: 16:21:13.877 tombstone v=2 src=cdc actor=shard1
+```
+
+This is the entire difference between a monitor and a verifier. A monitor tells you a key was stale,
+some minutes later, without telling you why. The trace says which mutations happened and from which
+path — an entry the write path should have tombstoned and did not is a different bug from one CDC was
+late on, and they have different fixes.
+
+Sextant learns which keys to check by tailing the binlog rather than being told about writes by the
+engine. That is deliberate: it sees writes the engine never saw — migrations, admin scripts — and
+cannot be lied to by the component it is checking.

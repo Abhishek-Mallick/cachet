@@ -1,0 +1,121 @@
+---
+title: What Cachet is
+description: Infrastructure, not a library — what you deploy, what you import, and how it reaches your application.
+---
+
+## The short answer
+
+**Cachet is a process you run, not a package you import.**
+
+It sits in the read path between your application and a sharded MySQL database. Your application
+talks to it over gRPC — normally through a Unix socket, because the default deployment is a sidecar
+next to your service.
+
+There *is* a client library, and it is deliberately thin. It exists to carry your session token, not
+to do the work.
+
+## What you deploy
+
+| Artifact | What it is | Where it runs |
+|---|---|---|
+| `cachet` | The query engine. The process your application reads through | Sidecar (Unix socket) or a shared service tier (TCP) |
+| `flux` | The CDC tailer. Streams the binlog and invalidates what the write path missed | One per deployment |
+| `sextant` | The consistency verifier. Publishes your measured consistency per level | Optional, and the thing to run first |
+| `cachetctl` | The operator CLI. Health, routing, key inspection, manual invalidation, benchmarks | Your laptop or a jump host |
+
+## What you import
+
+One Go module:
+
+```bash
+go get github.com/Abhishek-Mallick/cachet/pkg/cachet
+```
+
+```go
+import "github.com/Abhishek-Mallick/cachet/pkg/cachet"
+
+c, err := cachet.Dial(ctx, "unix:///var/run/cachet.sock")
+defer c.Close()
+
+got, err := c.Get(ctx, "entities:1")
+```
+
+### Is there an npm or pip package?
+
+**Not today.** The SDK is Go only.
+
+That is a real limitation and worth stating plainly rather than dressing up: if your services are
+written in TypeScript or Python, you can still use Cachet, but you generate your own client from the
+protocol definition rather than installing one.
+
+### Why the protocol is the real contract
+
+The wire format is gRPC, versioned independently as `cachet.v1`. Everything the Go SDK does is
+expressible in any language that can speak gRPC:
+
+```bash
+# The proto is in the repository; generate a client for your language.
+protoc --python_out=. --grpc_python_out=. api/cachet/v1/cachet.proto
+```
+
+Engine and client negotiate compatibility on connect, so a version mismatch is a startup error
+rather than a puzzling failure on whichever request first touches a changed field.
+
+<Callout type="warn" title="If you write your own client, carry the session token">
+  Cachet's session guarantee is carried by a token the client holds. The Go SDK threads it through
+  every call and across service boundaries for you.
+
+  A hand-written client that drops it does not get an error — it quietly gets a weaker guarantee
+  than the level it asked for, on exactly the requests where it mattered. If you generate your own
+  client, port that behaviour first. It is the one part of the SDK that is not convenience.
+</Callout>
+
+## Why a process and not a library
+
+The whole architecture rests on one thing: **a cache outside the database can only infer what a
+write touched. A cache inside the read path is told.**
+
+```
+   PROXY / APPLICATION MODEL              CACHET
+
+   app ──► cache ──► database             app ──► query engine ──► storage engine
+             │                                         │                 │
+             └─ sees: SQL text                         └─ sees: affected row keys
+                infers: "maybe this table"                knows: exactly these 3 rows
+                gives:  eventual consistency              gives: read-own-writes
+```
+
+A library linked into your application sees the same SQL your application sees, which is to say it
+sees a statement and not its consequences. When you run:
+
+```sql
+UPDATE orders SET status = 'shipped' WHERE customer_id = ? AND status = 'pending';
+```
+
+your application does not know which rows that touched. It can blow away the table's cache (correct,
+and destroys the hit rate), invalidate what it guesses (fast, and wrong in a way nothing reports), or
+fall back to a TTL (which does not make you correct — it shortens the window in which you are wrong).
+
+There is no fourth option *from inside the application*. That is why Cachet is a process that owns
+the read path, and it is the reason everything else in these docs is possible.
+
+## Do you need a UI to use it?
+
+No. Cachet is operated through `cachetctl` and observed through Prometheus and Grafana — a dashboard
+ships with the repository and `make demo` provisions it.
+
+This documentation site is the only web surface, and it exists to explain the system rather than to
+drive it.
+
+## Deployment shapes
+
+| Shape | Transport | When |
+|---|---|---|
+| **Sidecar** *(default)* | Unix socket | Lowest latency. Measured ~15% better at p99 than the service tier, and the shape the benchmarks use |
+| **Service tier** | TCP | Fewer processes to operate; easier to draw on an architecture diagram |
+| **Embedded** | — | Not shipped. It splits the API surface and doubles the testing matrix for a narrow audience |
+
+<Cards>
+  <Card title="Quickstart" href="/docs/quickstart" description="A working stack in about ninety seconds." />
+  <Card title="The SDK" href="/docs/sdk" description="Reads, writes, and carrying a session across services." />
+</Cards>

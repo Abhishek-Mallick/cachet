@@ -1,25 +1,27 @@
-<h1 align="center">Cachet</h1>
-
 <p align="center">
-  <strong>An integrated read cache for sharded OLTP databases<br/>
-  that continuously proves its own correctness — and reports it as a number.</strong>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/cachet-logo.png">
+    <img src="./.github/assets/cachet-logo.png" alt="Cachet" width="340">
+  </picture>
 </p>
 
 <p align="center">
-  <a href="./documentation/WHAT-IS-CACHET.md"><strong>📖 What is Cachet?</strong></a>
+  <strong>An integrated read cache for sharded OLTP databases<br/>
+  that proves its own correctness — and reports it as a number.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Abhishek-Mallick/cachet#quickstart"><strong>Quickstart</strong></a>
   &nbsp;·&nbsp;
-  <a href="./documentation/USING-CACHET.md"><strong>🚀 Quickstart</strong></a>
+  <a href="./documentation/WHAT-IS-CACHET.md"><strong>What is Cachet?</strong></a>
   &nbsp;·&nbsp;
   <a href="./CONSISTENCY.md">Consistency model</a>
-  &nbsp;·&nbsp;
-  <a href="#capabilities">Capabilities</a>
   &nbsp;·&nbsp;
   <a href="#benchmarks">Benchmarks</a>
 </p>
 
 <p align="center">
-  <sub>Apache 2.0 · Go 1.27 · MySQL/MyRocks + Valkey or Redis<br/>
-  <strong>Pre-1.0.</strong> The <a href="#capabilities">capabilities table</a> marks what ships today.</sub>
+  <sub>Apache 2.0 · Go 1.27 · MySQL/MyRocks + Valkey or Redis · <strong>pre-1.0</strong></sub>
 </p>
 
 ---
@@ -75,73 +77,38 @@ Precise invalidation is the foundation. Everything below is what it makes possib
 
 **Every cache on that list asks you to trust it. Cachet is the only one that proves it.**
 
-### Exact invalidation, on two paths
-
-Cachet invalidates the rows a write actually touched, not the table it might have touched.
-
-- **On the write path**, after commit and before the acknowledgement. By the time your write returns,
-  the stale entry is already gone. A conditional write (`UPDATE … WHERE tenant_id = ?`) resolves its
-  affected rows inside the transaction with `SELECT … FOR UPDATE` and invalidates exactly those.
-- **From the binlog**, as a backstop — and as the only path that catches writes made straight to the
-  database by a migration or an admin script.
-
-Both are versioned compare-and-set operations, so replaying the binlog is idempotent and a restarted
-tailer cannot undo newer state. When a predicate matches more rows than the resolution budget allows,
-Cachet says so in the response rather than silently doing less: the write still commits, the affected
-keys fall back to the binlog path, and the caller is handed the staleness bound that now applies.
-
-### Leases — bounded origin load
-
-On a miss, exactly one caller gets a token to fill that key. Concurrent callers wait briefly, then
-read the filled value. Origin load per key is bounded **regardless of concurrency** — by
-construction, not best-effort.
-
-Deduplicating concurrent fills — the common approach — fixes *ordering*: a slow fill can't overwrite
-a newer value. It does nothing for *admission*. Ten thousand simultaneous misses on a hot key still
-all reach the database, which is exactly when you can least afford them.
-
-Measured by a test that runs on every build: **500 concurrent readers of one invalidated hot key
-produce a single origin read.** With waiting switched off, 198 of 200 reach the database. The test
-also asserts that the readers genuinely contended — if none of them ever waited on another's fill,
-it fails rather than take credit for preventing a stampede that never formed.
-
-Waiting is bounded, and a caller that gives up reads the origin itself. A lease holder that died is
-indistinguishable from one nearly finished, so waiting longer is a guess — and guessing wrong on the
-hottest key in the system is a self-inflicted outage worse than the stampede.
-
-### Adaptive admission — no human decides what to cache
-
-Cachet tracks the observed read:write ratio **per key** with a count-min sketch, and caches only
-what earns it. Two thresholds rather than one — admitted at 20:1, evicted below 10:1 — so a
-borderline key sits still instead of flipping. A test drives a key across that band for 200 rounds
-and requires **zero** state changes, because each flip would be a wasted fill plus a wasted
-invalidation: a policy that oscillates is strictly worse than caching everything.
-
-The usual approach is a person picking tables and a rule of thumb about read:write ratios. But
-ratios aren't uniform within a table and they drift. A write-churning key in an otherwise read-heavy
-table is pure cost: every write pays invalidation, every read misses. Cachet finds those keys and
-stops caching them, continuously.
-
-### Sextant — continuous consistency verification 🔭
-
-A verifier that subscribes to the invalidation stream, shadow-reads every cache replica, and detects
-divergence — with **consistency tracing** that records each mutation, so "why was this stale?" has
-an answer instead of a shrug.
-
-This is the feature the category is missing. Sampling monitors tell you a violation happened, some
-minutes later, without telling you why. Sextant runs continuously and keeps enough state to
-reconstruct the sequence that caused any divergence it finds.
-
 ### Consistency as a per-request parameter
 
 | Level | Guarantee | For |
 |---|---|---|
-| `STRONG` | Bypasses cache | Money, auth |
+| `STRONG` | Bypasses the cache | Money, auth |
 | `SESSION` *(default)* | Read-own-writes + monotonic reads | Almost everything |
-| `BOUNDED(t)` | Staleness ≤ t | Feeds, counts, listings |
+| `BOUNDED(t)` | Staleness ≤ t, measured from **commit** | Feeds, counts, listings |
 | `EVENTUAL` | Best effort | Recommendations |
 
-And Sextant publishes a **measured SLO per level** — not a promise in a doc, a live number.
+Riak had per-request tunable consistency and the industry dropped it. It should not have.
+
+The non-obvious part: a session watermark is checked against the **fill version** — the database
+state an entry was filled from — not the row's own version. Watermarking on the row version
+collapses the hit rate to near zero on any shard taking writes. The payoff is testable and
+surprising: read-own-writes holds with *no invalidation at all*.
+
+### Sextant — the verifier 🔭
+
+```
+entities:9980001 on shard1: cache fv=117287293673472000, db=117287293673537536,
+behind 1m0s, violates [EVENTUAL]
+  trace: 16:21:13.877 fill      v=1 src=read_fill actor=engine-1
+  trace: 16:21:13.877 tombstone v=2 src=cdc actor=shard1
+```
+
+Sampling monitors tell you a violation happened, minutes later, without telling you why. Sextant
+runs continuously, keeps enough state to reconstruct the sequence that caused any divergence it
+finds, and publishes a measured SLO per level. That trace is the whole difference between a monitor
+and a verifier.
+
+Run it in **shadow mode** first — pointed at a deployment your application is not reading through,
+it reports what your consistency *would have been*, with no code change and no risk.
 
 ## Architecture
 
@@ -207,38 +174,35 @@ boundary. `make demo` brings the same stack up with Prometheus and a provisioned
 
 Full walkthrough: **[Quickstart →](./documentation/USING-CACHET.md)**
 
-## Capabilities
+## Features
 
-Cachet is pre-1.0 and developed in the open. This table is the contract: everything marked
-**Available** is implemented, tested against a real MySQL + Valkey stack, and covered by the
-consistency conformance suite.
+| | |
+|---|---|
+| **Exact invalidation** | The write path knows which rows changed and invalidates them before your write is acknowledged. Conditional writes resolve their affected rows inside the transaction. The binlog is the backstop, catching migrations and admin scripts. |
+| **Consistency per request** | `STRONG`, `SESSION`, `BOUNDED(t)` or `EVENTUAL`, chosen per call — with read-own-writes on the hot path that does not collapse the hit rate. |
+| **Measured, not asserted** | Sextant watches the cache against the database and publishes consistency per level. Every violation carries a trace that says *why*. |
+| **Shadow mode** | Point it at a deployment you are not reading through and measure what your consistency *would have been* — no code change, no risk. |
+| **Stampede-proof** | One caller fills a hot key; everyone else waits briefly. 500 concurrent readers of one invalidated key produce a single origin read. |
+| **Self-tuning** | Per-key read:write ratios decide what gets cached, so a write-churning key in a read-heavy table stops being cached without anyone filing a ticket. |
+| **Survives its own failures** | A proportional circuit breaker sheds a *fraction* of traffic to an unhealthy node. Losing the cache entirely is a correctness non-event. |
+| **Built to be operated** | `cachetctl` for health, routing, key inspection and manual invalidation. Prometheus metrics and a provisioned Grafana dashboard. |
 
-| | Capability | |
-|---|---|---|
-| **Available** | Integrated read cache for sharded MySQL, with read-through fill | ✅ |
-| | Exact invalidation on the write path — after commit, before the ack | ✅ |
-| | Exact invalidation from the binlog, with durable checkpoints and idempotent replay | ✅ |
-| | Conditional writes that resolve their affected rows inside the transaction | ✅ |
-| | Four consistency levels, selected per request | ✅ |
-| | Session tokens: read-own-writes, read-own-inserts, read-own-deletes, monotonic reads | ✅ |
-| | Causal propagation across service boundaries via OpenTelemetry baggage | ✅ |
-| | Negative caching, with read-own-inserts over a cached absence | ✅ |
-| | Cache sharding independent of database sharding | ✅ |
-| | Proportional circuit breaker — sheds a fraction of traffic to an unhealthy node | ✅ |
-| | Go SDK (`cachet-go`) that carries the session for you | ✅ |
-| | Operator CLI (`cachetctl`) — health, routing, key inspection, manual invalidation | ✅ |
-| | Prometheus metrics and a provisioned Grafana dashboard | ✅ |
-| | Leases — origin load per key bounded regardless of concurrency | ✅ |
-| | Adaptive per-key admission driven by observed read:write ratio | ✅ |
-| | Sextant — continuous consistency verification, with a live SLO per level | ✅ |
-| | Shadow mode — measure your consistency before changing any application code | ✅ |
-| **Roadmap** | Gossiped admission state across engine instances | ⬜ |
-| | Published benchmark numbers on dedicated hardware | ⬜ |
+## What you actually run
 
-**On the benchmark row:** four configurations have working implementations and no published figure.
-They stay blank until they can be measured on a host that is not a laptop VM — filling them from a
-noisy machine would produce numbers that look like measurements and are artefacts. The capability
-claims below rest on tests that run on every build, not on that table.
+Cachet is **infrastructure, not a library**. You run a process — as a sidecar over a Unix socket, or
+as a shared service tier over TCP — and your application talks to it through a thin client.
+
+| | |
+|---|---|
+| `cachet` | The query engine. The process your application reads through |
+| `flux` | The CDC tailer, streaming the binlog as an invalidation backstop |
+| `sextant` | The consistency verifier. Run it in shadow mode first |
+| `cachetctl` | The operator CLI |
+| `cachet-go` | A Go module — `go get github.com/Abhishek-Mallick/cachet/pkg/cachet` |
+
+The SDK is Go today. The contract is gRPC (`cachet.v1`), so any language that can generate a client
+can talk to it — but port the session-token handling first, because that is what carries the
+guarantee. [More on that →](./documentation/WHAT-IS-CACHET.md)
 
 ## Guarantees, and how they are checked
 
@@ -263,7 +227,12 @@ Two results worth stating plainly, because they cut against the product's own pi
 ## Benchmarks
 
 Every row below is regenerated by `make bench-report` from JSON in `bench/results/`. No number here
-is typed by hand, and the empty rows stay empty until the capability that fills them exists.
+is typed by hand.
+
+**The empty rows have working implementations and no published figure.** They stay blank until they
+can be measured on a host that is not a laptop VM — filling them from a noisy machine would produce
+numbers that look like measurements and are artefacts. The feature claims above rest on tests that
+run on every build, not on this table.
 
 **Origin QPS** is steady-state database load — the cost metric the caching claim actually rests on.
 
@@ -311,6 +280,8 @@ it rides on, while CDC adds a variable delivery delay:
 <sub>250 observations each, none failing to converge. Methodology: [`docs/cachet-benchmarking.md`](./docs/cachet-benchmarking.md).</sub>
 
 ## Documentation
+
+**[📚 Full documentation site](./web)** — run it locally with `cd web && npm install && npm run dev`.
 
 | Doc | What it covers |
 |---|---|

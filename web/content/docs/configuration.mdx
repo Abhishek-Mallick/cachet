@@ -1,0 +1,95 @@
+---
+title: Configuration
+description: The full config file, and which settings change what Cachet promises.
+---
+
+Configuration is one YAML file, loaded once and validated before anything else starts. An invalid
+config fails to boot with an error naming the offending field — discovering it on the first user
+request turns an operator problem into a customer problem.
+
+```yaml
+listen:
+  - "tcp://:9090"
+  - "unix:///var/run/cachet.sock"
+
+shards:
+  - { id: shard0, dsn: "user:pass@tcp(127.0.0.1:3306)/cachet" }
+  - { id: shard1, dsn: "user:pass@tcp(127.0.0.1:3307)/cachet" }
+  - { id: shard2, dsn: "user:pass@tcp(127.0.0.1:3308)/cachet" }
+
+cache:
+  # Cache NODES, routed by their own ring — independent of the shards above.
+  addresses: ["10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379"]
+
+  lease:
+    ttl: 2s
+    wait_attempts: 4
+    wait_backoff: 5ms
+    wait_backoff_max: 50ms
+
+  admission:
+    enabled: false
+    admit_ratio: 20
+    evict_ratio: 10
+    min_samples: 50
+    min_dwell: 30s
+    window: 1m
+
+  breaker:
+    window: 10s
+    buckets: 10
+    min_requests: 20
+    failure_floor: 0.05
+    max_shed: 0.95        # MUST stay below 1
+
+default_level: SESSION
+
+observability:
+  metrics_listen: ":9100"
+  log_level: info
+  service_name: cachet
+
+shutdown:
+  drain_timeout: 15s
+```
+
+Environment overrides use the `CACHET_` prefix and **two** underscores for nesting, since the keys
+contain single underscores themselves:
+
+```bash
+CACHET_CONSISTENCY__ENTRY_TTL=30s
+CACHET_OBSERVABILITY__LOG_LEVEL=debug
+```
+
+## Guarantee settings
+
+These change what Cachet **promises**. They are logged at boot and exported as
+`cachet_guarantee_setting` gauges, precisely so a changed guarantee cannot go unnoticed.
+
+| Setting | Default | What changing it changes |
+|---|---|---|
+| `consistency.max_clock_skew` | `250ms` | Bounds engine↔shard clock disagreement. Shortens the `BOUNDED(t)` window so the engine stays conservative about its own clock |
+| `consistency.cdc_lag_bound` | `5s` | The staleness bound applied to degraded writes and to writes made **directly to MySQL** |
+| `consistency.write_path_invalidation_budget` | `50ms` | How long synchronous invalidation may take before the write path becomes the suspect in an investigation |
+| `consistency.max_affected_keys` | `1000` | Where a conditional write stops resolving keys exactly and falls back to CDC, reporting `degraded`. **Per shard**, because each shard commits in its own transaction |
+| `consistency.entry_ttl` | `4h` | The last-resort safety net and `EVENTUAL` convergence bound. **Correctness comes from invalidation; the TTL is the backstop, not the strategy** |
+| `consistency.synchronous_invalidation` | `true` | ON: a committed write is invisible to other sessions for microseconds. OFF: invalidation falls entirely to CDC, bounded by `cdc_lag_bound` |
+
+## Tuning knobs
+
+`cache.lease.*`, `cache.admission.*` and `cache.breaker.*` are **not** guarantee settings. They
+change who pays for a fill and when, never what a read is allowed to return.
+
+## Compatibility
+
+| | |
+|---|---|
+| Database | MySQL 8.0 with MyRocks (Percona Server). InnoDB is supported and CI-tested |
+| Cache | Valkey 8 (default) or Redis — protocol- and Lua-compatible |
+| Go | 1.27+ for the SDK |
+| Transports | gRPC over TCP and Unix sockets, both first-class |
+
+Semver on every artifact, with the gRPC protocol versioned independently as `cachet.v1`. Engine and
+SDK negotiate on connect, so a mismatch is a startup error rather than a puzzling failure later.
+
+**A change to the consistency model is always a major version.** The guarantee is the contract.

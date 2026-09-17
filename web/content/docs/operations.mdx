@@ -1,0 +1,112 @@
+---
+title: Operating Cachet
+description: cachetctl, leases, adaptive admission, and what happens when a cache node dies.
+---
+
+## cachetctl
+
+```bash
+cachetctl status                          # reachability and latency of every cache node
+cachetctl ring                            # both routing rings, and each node's share of the keys
+cachetctl inspect entities:1              # where a key lives, and what the cache holds for it
+cachetctl invalidate entities:1 -dry-run  # preview the blast radius
+cachetctl checkpoint -state-dir ./.flux   # how far each shard's tailer has got
+cachetctl bench quick                     # a 30-second smoke benchmark
+cachetctl admission explain entities:1    # why a key is or is not cached
+```
+
+Every command takes `-config <path>` and `-json`.
+
+### inspect
+
+```
+key         entities:1
+cache node  127.0.0.1:6379
+shard       shard1
+cached      yes — value
+row ver     117253494587916288   (orders fills against each other)
+fill ver    117253501905666048   (answers freshness)
+payload     256 bytes
+expires in  3h59m56s
+```
+
+**Both versions, always.** The gap above is the design working: this row has not been written in a
+while (old row version) but was read from the database moments ago (recent fill version). Shown only
+one of them, you cannot tell a stale entry from an old row that is perfectly fresh.
+
+It also distinguishes a **negative entry** — "we know this row does not exist" — from an absent one:
+"we have not looked". Identical to a reader, completely different to you.
+
+`ring` deliberately shows **both** rings side by side, because the cache ring and the shard ring are
+independent and the most expensive assumption you can make is that they are the same thing under two
+names.
+
+## Leases — stampede protection
+
+On a miss, exactly one caller gets the right to fill that key. Concurrent callers wait briefly, then
+read the filled value.
+
+```yaml
+cache:
+  lease:
+    ttl: 2s                  # ceiling on damage: how long a dead holder can block a key
+    wait_attempts: 4         # 0 disables waiting; leases still bound who fills
+    wait_backoff: 5ms
+    wait_backoff_max: 50ms
+```
+
+**500 concurrent readers of one invalidated hot key produce a single origin read.** With waiting
+disabled, 198 of 200 reach the database. Both are asserted by a test that also checks the readers
+genuinely contended — if none ever waited, it fails rather than take credit for preventing a
+stampede that never formed.
+
+Waiting is bounded and a caller that gives up reads the origin itself. A lease holder that died is
+indistinguishable from one nearly finished, so waiting longer is a guess — and guessing wrong on the
+hottest key in the system is a self-inflicted outage worse than the stampede.
+
+## Adaptive admission
+
+Off by default. When enabled, Cachet measures each key's read:write ratio and stops caching keys that
+do not earn it.
+
+```yaml
+cache:
+  admission:
+    enabled: true
+    admit_ratio: 20      # cache at or above 20:1 reads:writes
+    evict_ratio: 10      # stop caching below 10:1
+    min_samples: 50
+    min_dwell: 30s
+    window: 1m
+```
+
+**The gap between the two ratios is the point**, not sloppiness. With a single threshold a borderline
+key flips on every sample, and each flip is a wasted fill plus a wasted invalidation — making the
+policy strictly worse than caching everything. An `evict_ratio` above `admit_ratio` is refused at
+boot, because it inverts the band and guarantees exactly that.
+
+Admission changes **who pays**, never what a read returns: an uncached read is served from the
+database, which is at least as fresh as the cache would have been.
+
+## When a cache node misbehaves
+
+A **proportional** circuit breaker, not a latch. A node failing 30% of the time is still answering
+70% of its reads; tripping it fully open throws that away and sends every key it owns to the database
+at once, turning a partial degradation into a cliff.
+
+Shedding scales with the observed failure rate and is capped below 100%, so probe traffic always
+survives to notice recovery. A `max_shed` of 1.0 is refused at boot: a breaker that never calls the
+node again can never observe it recover.
+
+<Callout type="warn" title="Reads are shed; invalidations never are">
+  Shedding a read costs hit rate — the value comes from the database instead and nobody is
+  misinformed. Shedding an invalidation costs **correctness**: the stale entry survives and the cache
+  goes on serving a value the database has already changed.
+
+  That asymmetry is enforced by a test, and the test was checked by making the mistake on purpose.
+</Callout>
+
+## Losing the cache entirely
+
+A correctness non-event. Every read falls through to the database, which is at least as fresh. That
+is a cell in the conformance matrix, not an aspiration.

@@ -1,0 +1,98 @@
+---
+title: Quickstart
+description: A working stack in about ninety seconds, then your own numbers.
+---
+
+## Prerequisites
+
+- **Go 1.27+**
+- **Docker** with Compose
+- **GNU Make ≥ 3.82** on macOS — the system `make` is 3.81 and silently ignores `.SHELLFLAGS`, which
+  makes a failing `env-up` report success. `brew install make`, then use `gmake`.
+
+## Bring up the stack
+
+```bash
+git clone https://github.com/Abhishek-Mallick/cachet
+cd cachet
+
+make env-up        # 3 MyRocks shards + Valkey, healthy in ~15s
+make seed          # deterministic fixtures
+make build         # cachet, flux, sextant, cachetctl, benchctl -> ./bin
+```
+
+Then run the engine:
+
+```bash
+./bin/cachet -config cachet.yaml
+```
+
+<Callout title="The 90-second demo">
+  `make demo` brings the same stack up with Prometheus and a provisioned Grafana dashboard, at
+  <code>http://localhost:3000</code> (admin/admin). Ten panels, including the guarantee settings read
+  live from the running process.
+</Callout>
+
+## Talk to it
+
+```go
+import (
+    "github.com/Abhishek-Mallick/cachet/pkg/cachet"
+    "github.com/Abhishek-Mallick/cachet/pkg/consistency"
+)
+
+c, err := cachet.Dial(ctx, "unix:///var/run/cachet.sock")
+defer c.Close()
+
+_, err = c.Put(ctx, "entities:1", cachet.Record{TenantID: 1, Payload: body})
+
+got, err := c.Get(ctx, "entities:1")                                  // SESSION by default
+got, err = c.Get(ctx, "entities:1", cachet.AtLevel(consistency.Strong))
+got, err = c.Get(ctx, "entities:1", cachet.WithinStaleness(2*time.Second))
+```
+
+No token appears anywhere — the client carries your session for you, including across a service
+boundary.
+
+## Get your own numbers
+
+```bash
+./bin/cachetctl bench quick -config cachet.yaml -rate 200 -measure 15s
+```
+
+```
+cachet bench quick — tcp://127.0.0.1:9090, 200 rps for 15s
+
+  requests    3000 (200 rps achieved, 0 errors)
+  latency     p50 1.69ms · p90 3.94ms · p99 11.74ms
+  hit rate    81.5%
+  origin      27 qps reaching the database
+```
+
+**Origin QPS is the number worth watching.** It is the database load the cache removed, and it is
+the cost metric the whole caching claim rests on. Latency often barely moves while database load
+collapses.
+
+<Callout type="warn" title="This is a smoke test">
+  One run, a short window, and whatever else your machine is doing. It answers "is this doing
+  anything for me", not "what is my p99". If the load generator falls behind it tells you and asks
+  for a lower rate, because a run whose generator could not keep up measured the generator.
+
+  For figures you would publish, `make bench` takes three runs and records a provenance line naming
+  the host.
+</Callout>
+
+## Measure your consistency before you commit to anything
+
+```bash
+./bin/sextant -config cachet.yaml -shadow
+```
+
+Shadow mode points the verifier at a deployment your application is **not** reading through, and
+reports what your consistency would have been. No code change, no risk — and it never writes to the
+cache it observes.
+
+<Cards>
+  <Card title="The SDK" href="/docs/sdk" description="Reads, writes, and carrying a session across services." />
+  <Card title="Verifying consistency" href="/docs/verifying" description="What Sextant measures and how to read it." />
+</Cards>

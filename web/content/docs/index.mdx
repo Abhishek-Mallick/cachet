@@ -1,0 +1,43 @@
+---
+title: Introduction
+description: An integrated read cache for sharded OLTP databases that proves its own correctness.
+---
+
+Your services each cache in Redis. Each one invalidates differently. None of you can say how often
+you are serving stale data.
+
+That is not a discipline problem — it is a **layering** problem. The cache lives in the application,
+and the application only sees SQL. When it issues `UPDATE orders SET status=? WHERE customer_id=?`,
+it does not know which rows that touched. So it guesses.
+
+Cachet moves the cache into the data layer, where the write path knows exactly which rows changed
+and can invalidate them before the write is acknowledged.
+
+## What that buys you
+
+<Cards>
+  <Card title="Exact invalidation" href="/docs/consistency" description="Rows, not tables. Before the ack, not eventually." />
+  <Card title="Consistency you choose" href="/docs/consistency" description="STRONG, SESSION, BOUNDED(t) or EVENTUAL, per request." />
+  <Card title="A number, not a promise" href="/docs/verifying" description="Sextant measures your real consistency and says why when it slips." />
+  <Card title="Stampede protection" href="/docs/operations" description="One caller fills a hot key; everyone else waits briefly." />
+</Cards>
+
+## Where to start
+
+<Cards>
+  <Card title="What Cachet is" href="/docs/what-is-cachet" description="A process, not a library — and what that means for your stack." />
+  <Card title="Quickstart" href="/docs/quickstart" description="A working stack, seeded and benchmarked, in about ninety seconds." />
+</Cards>
+
+## Status
+
+Cachet is **pre-1.0** and developed in the open under Apache 2.0.
+
+Everything documented here is implemented and covered by a consistency conformance suite that runs
+on every build — including a test that deliberately breaks the cache and requires the suite to catch
+it, because a consistency test that has never failed is proving nothing.
+
+Published benchmark figures are a separate matter and deliberately sparse: several configurations
+have working implementations and no published number, because they have not yet been measured on a
+host that is not a laptop VM. That gap is stated rather than filled with numbers that look like
+measurements and are artefacts.
