@@ -10,9 +10,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -33,7 +35,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: benchctl <run|probe|report|guard> [flags]")
+		return errors.New("usage: benchctl <run|probe|report|guard|microbench> [flags]")
 	}
 	switch os.Args[1] {
 	case "run":
@@ -42,10 +44,12 @@ func run() error {
 		return report(os.Args[2:])
 	case "probe":
 		return probeStaleness(os.Args[2:])
+	case "microbench":
+		return microbenchCmd(os.Args[2:])
 	case "guard":
 		return guard(os.Args[2:])
 	default:
-		return fmt.Errorf("unknown command %q (want run, probe, report or guard)", os.Args[1])
+		return fmt.Errorf("unknown command %q (want run, probe, report, guard or microbench)", os.Args[1])
 	}
 }
 
@@ -528,4 +532,98 @@ func fmtUs(us int64) string {
 		return fmt.Sprintf("%dµs", us)
 	}
 	return fmt.Sprintf("%.2fms", d.Seconds()*1000)
+}
+
+// microbenchCmd folds a `go test -bench` run into the per-commit history table.
+//
+// The parsing and rendering live in bench/harness where they are tested, rather than in a shell
+// pipeline in the workflow file. A regression tracker whose own correctness depends on untested awk
+// is a tracker that will one day report a regression that is really a parsing bug — and the whole
+// value of the thing is being believable.
+func microbenchCmd(args []string) error {
+	fs := flag.NewFlagSet("microbench", flag.ExitOnError)
+	var (
+		in     = fs.String("in", "-", "go test -bench output to read, or - for stdin")
+		out    = fs.String("out", "bench/PER-COMMIT.md", "history file to update")
+		commit = fs.String("commit", "", "commit sha (required)")
+		date   = fs.String("date", "", "commit date, YYYY-MM-DD (defaults to today)")
+		keep   = fs.Int("keep", 25, "how many commits of history to retain")
+	)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *commit == "" {
+		return errors.New("benchctl microbench: -commit is required")
+	}
+	if *date == "" {
+		*date = time.Now().UTC().Format("2006-01-02")
+	}
+
+	var src io.Reader = os.Stdin
+	if *in != "-" {
+		// An operator-supplied path is this flag's entire purpose: a developer CLI reading a file it
+		// was pointed at, not a server handling a request.
+		f, err := os.Open(filepath.Clean(*in))
+		if err != nil {
+			return fmt.Errorf("benchctl microbench: %w", err)
+		}
+		defer func() { _ = f.Close() }()
+		src = f
+	}
+
+	results, err := harness.ParseBenchmarks(src)
+	if err != nil {
+		return err
+	}
+	if len(results) == 0 {
+		// Writing an empty row would put a line of dashes in the history for a commit that was
+		// never measured, which is worse than no row: it looks like a measurement.
+		return errors.New("benchctl microbench: no benchmark results found in the input")
+	}
+
+	outPath, err := safeOutputPath(*out)
+	if err != nil {
+		return err
+	}
+
+	//nolint:gosec // G304: outPath is validated by safeOutputPath immediately above.
+	existing, err := os.ReadFile(outPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("benchctl microbench: read %s: %w", *out, err)
+	}
+
+	short := *commit
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	table := harness.RenderBenchTable(existing, harness.BenchRow{
+		Commit: short, Date: *date, Results: results,
+	}, *keep)
+
+	// safeOutputPath above rejects absolute paths and anything escaping the working directory.
+	// gosec's analysis is static and cannot see a runtime guard, so it reports this regardless; the
+	// guard is the real control.
+	//nolint:gosec // G703: the path is validated by safeOutputPath immediately above.
+	if err := os.WriteFile(outPath, []byte(table), 0o600); err != nil {
+		return fmt.Errorf("benchctl microbench: write %s: %w", outPath, err)
+	}
+	fmt.Printf("recorded %d benchmark(s) for %s in %s\n", len(results), short, *out)
+	return nil
+}
+
+// safeOutputPath resolves the history file, refusing anything that escapes the working directory.
+//
+// This tool runs in CI holding a token that can push to main, which makes "where does it write?" a
+// question worth answering precisely rather than trusting a flag. The constraint is also just
+// correct: the history file belongs in the repository, so a path outside it is a mistake whichever
+// way it arrived.
+func safeOutputPath(p string) (string, error) {
+	if filepath.IsAbs(p) {
+		return "", fmt.Errorf("benchctl microbench: -out must be a relative path inside the repository, got %q", p)
+	}
+	clean := filepath.Clean(p)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("benchctl microbench: -out escapes the working directory: %q", p)
+	}
+	return clean, nil
 }

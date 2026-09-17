@@ -1,0 +1,82 @@
+name: bench
+
+# Records a microbenchmark row per commit, so a performance regression is caught by the build
+# rather than by a benchmark somebody remembers to run.
+#
+# It fires only on changes to internal/ and pkg/ — the code that actually runs on the request path.
+# A docs-only commit cannot change a ns/op figure, and a row for it would be a line of noise in a
+# file whose whole value is that a change in it means something.
+#
+# WHAT THESE NUMBERS ARE. Regression signals, not published benchmarks. They run on a shared GitHub
+# runner, which is exactly the environment docs/cachet-benchmarking.md calls neither predictable nor
+# representative. The allocs/op column is the trustworthy one: allocation counts do not depend on how
+# fast or how busy the machine is. ns/op is noisy but still catches what matters — the adaptive
+# admission defect that cost 630ms of tail latency appeared here as a 4x regression.
+#
+# Published figures come from `make bench` on a host whose characteristics are disclosed, and land in
+# the README table. Nothing in this workflow writes there.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'internal/**'
+      - 'pkg/**'
+      - '.github/workflows/bench.yml'
+
+permissions:
+  # Needed to push the updated history file back. This is the only workflow with write access, and
+  # the only path it writes is bench/PER-COMMIT.md.
+  contents: write
+
+concurrency:
+  # Never two of these at once: both would read the same history file and the second push would
+  # clobber the first's row.
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.27.1"
+
+jobs:
+  microbench:
+    name: microbenchmarks · per commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+
+      - name: run microbenchmarks
+        # -benchtime=1s keeps the whole job inside a couple of minutes. -run=^$ skips the tests:
+        # this job measures, the ci workflow is what decides whether the code is correct.
+        run: |
+          go test -run='^$' -bench=. -benchmem -benchtime=1s ./internal/... ./pkg/... \
+            | tee /tmp/bench.txt
+
+      - name: record the result
+        run: |
+          go run ./cmd/benchctl microbench \
+            --in /tmp/bench.txt \
+            --out bench/PER-COMMIT.md \
+            --commit "${{ github.sha }}" \
+            --date "$(git show -s --format=%cs ${{ github.sha }})"
+
+      - name: commit the history
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- bench/PER-COMMIT.md; then
+            echo "no change to the benchmark history"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bench/PER-COMMIT.md
+          # [skip ci] is belt to the paths filter's braces: this commit touches only a markdown file
+          # under bench/, which the filter above already excludes, so it cannot retrigger this
+          # workflow. Both are cheap and a loop here would be expensive.
+          git commit -m "bench: record microbenchmarks for ${GITHUB_SHA:0:7} [skip ci]"
+          # A concurrent push would make this fail rather than clobber; rebasing onto it keeps the
+          # other commit and re-applies the row.
+          git pull --rebase origin main
+          git push origin HEAD:main

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/breaker"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
@@ -39,6 +40,7 @@ commands:
   invalidate <key>           tombstone one key by hand (use -dry-run first)
   checkpoint                 each shard's durable CDC tailer position
   admission explain <key>    why a key is or is not being cached
+  bench quick                a 30-second smoke benchmark against a live cluster
 
 every command accepts -config <path> and -json.
 `
@@ -67,6 +69,10 @@ func run(args []string) error {
 		return invalidateCmd(args[1:])
 	case "checkpoint":
 		return checkpointCmd(args[1:])
+	case "admission":
+		return admissionCmd(args[1:])
+	case "bench":
+		return benchCmd(args[1:])
 	case "-version", "--version", "version":
 		fmt.Println("cachetctl", version)
 		return nil
@@ -320,6 +326,96 @@ func checkpointCmd(args []string) error {
 	}
 
 	report, err := ctl.Checkpoints(cfg, *stateDir)
+	if err != nil {
+		return err
+	}
+	return emit(report, *asJSON)
+}
+
+func admissionCmd(args []string) error {
+	if len(args) == 0 || args[0] != "explain" {
+		return errors.New("usage: cachetctl admission explain <key>")
+	}
+
+	fs := flag.NewFlagSet("admission explain", flag.ContinueOnError)
+	configPath, asJSON := commonFlags(fs)
+	rest, err := parseArgs(fs, args[1:])
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return errors.New("usage: cachetctl admission explain <key>")
+	}
+
+	cfg, err := load(*configPath)
+	if err != nil {
+		return err
+	}
+	if !cfg.Cache.Admission.Enabled {
+		return errors.New("adaptive admission is disabled (cache.admission.enabled); every key is cached")
+	}
+
+	// A controller built from the same configuration the engine runs. It reports what the POLICY
+	// would decide, not what a running engine has observed — the sketch lives in the engine process
+	// and is not shared. Said plainly in the output rather than left for someone to discover.
+	ctrl := admission.NewController(admission.ControllerOptions{
+		Sketch: admission.NewSketch(admission.SketchOptions{Window: cfg.Cache.Admission.Window}),
+		Policy: admission.NewPolicy(admission.PolicyOptions{
+			AdmitRatio:   cfg.Cache.Admission.AdmitRatio,
+			EvictRatio:   cfg.Cache.Admission.EvictRatio,
+			MinSamples:   cfg.Cache.Admission.MinSamples,
+			MinDwell:     cfg.Cache.Admission.MinDwell,
+			DefaultAdmit: true,
+		}),
+	})
+
+	report, err := ctl.ExplainAdmission(ctrl, rest[0])
+	if err != nil {
+		return err
+	}
+	if err := emit(report, *asJSON); err != nil {
+		return err
+	}
+	if !*asJSON {
+		fmt.Println("\nNote: this reflects the configured policy against a fresh counter set. The live\n" +
+			"read:write history lives in the engine process and is not shared with this tool.")
+	}
+	return nil
+}
+
+func benchCmd(args []string) error {
+	if len(args) == 0 || args[0] != "quick" {
+		return errors.New("usage: cachetctl bench quick [flags]")
+	}
+
+	fs := flag.NewFlagSet("bench quick", flag.ContinueOnError)
+	configPath, asJSON := commonFlags(fs)
+	target := fs.String("target", "tcp://127.0.0.1:9090", "engine address")
+	metrics := fs.String("metrics", "http://127.0.0.1:9100/metrics", "engine metrics endpoint")
+	rate := fs.Int("rate", 200, "requests per second")
+	workers := fs.Int("workers", 32, "concurrent in-flight requests")
+	measure := fs.Duration("measure", 15*time.Second, "measurement window")
+	warmup := fs.Duration("warmup", 5*time.Second, "warmup, discarded")
+	keys := fs.Uint64("keys", 1000, "distinct rows the workload touches")
+	keyBase := fs.Uint64("key-base", 1, "first row id; these MUST exist in your database")
+	if _, err := parseArgs(fs, args[1:]); err != nil {
+		return err
+	}
+
+	// The config is loaded and validated even though the benchmark talks over the wire, so a
+	// mistyped file fails here rather than after someone has waited out a measurement window.
+	if _, err := load(*configPath); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *warmup+*measure+time.Minute)
+	defer cancel()
+
+	report, err := ctl.BenchQuick(ctx, ctl.BenchOptions{
+		Target: *target, Rate: *rate, Workers: *workers,
+		Warmup: *warmup, Measure: *measure,
+		Keys: *keys, KeyBase: *keyBase, ReadFraction: 0.95,
+	}, *metrics)
 	if err != nil {
 		return err
 	}

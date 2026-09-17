@@ -286,6 +286,7 @@ The control plane. Five commands, each answering a question you ask during an in
 takes `-config <path>` and `-json`.
 
 ```bash
+cachetctl bench quick                     # 30-second smoke benchmark against YOUR database
 cachetctl status                          # is every cache node answering, and how fast?
 cachetctl ring                            # both routing rings, and each node's share of the keys
 cachetctl inspect entities:1              # where does this key live, and what do we hold for it?
@@ -314,6 +315,30 @@ an old row that is perfectly fresh.
 
 `inspect` also distinguishes a **negative entry** ("we know this row does not exist") from an absent
 one ("we have not looked"). They are identical to a reader and completely different to you.
+
+### Benchmarking your own database
+
+```bash
+cachetctl bench quick -config cachet.yaml -rate 200 -measure 15s
+```
+
+```
+cachet bench quick — tcp://127.0.0.1:9090, 150 rps for 8s
+
+  requests    1200 (150 rps achieved, 0 errors)
+  latency     p50 1.69ms · p90 3.94ms · p99 11.74ms
+  hit rate    81.5%
+  origin      27 qps reaching the database
+```
+
+**Origin QPS is the number worth watching** — it is the database load the cache removed, and it is
+the cost metric the whole caching claim rests on. Latency often barely moves while database load
+collapses.
+
+It says so itself, but: this is a **smoke test**, not a published benchmark. One run, a short window,
+and whatever else your machine is doing. If the load generator falls behind it tells you and asks you
+to lower `-rate`, because a run whose generator could not keep up measured the generator. For
+publishable figures use `make bench`, which takes three runs and records a provenance line.
 
 `ring` deliberately shows **both** rings side by side, because the cache ring and the shard ring are
 independent and the most expensive assumption you can make is that they are the same thing under two
