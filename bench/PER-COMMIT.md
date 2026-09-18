@@ -19,7 +19,21 @@
 > Published figures live in the [README benchmark table](../README.md#benchmarks), measured by
 > `make bench` on a host whose characteristics are disclosed.
 
-| Commit | Date | ControllerConcurrent<br/><sub>ns/op · allocs/op</sub> | RingLookup<br/><sub>ns/op · allocs/op</sub> | SketchCounts<br/><sub>ns/op · allocs/op</sub> | TokenAdvance<br/><sub>ns/op · allocs/op</sub> | TokenProto<br/><sub>ns/op · allocs/op</sub> |
-|---|---|---|---|---|---|---|
-| `0da9ba6` | 2026-09-18 | 891.0ns · 3 | 45.6ns · 0 | 152.5ns · 0 | 40.7ns · 0 | 306.9ns · 2 |
-| `f6895c8` | 2026-09-17 | 1.20µs · 3 | 24.0ns · 0 | 178.3ns · 0 | 38.3ns · 0 | 374.2ns · 2 |
+| Commit | Date | ControllerConcurrent<br/><sub>ns/op · allocs/op</sub> | RingLookup<br/><sub>ns/op · allocs/op</sub> | SketchCounts<br/><sub>ns/op · allocs/op</sub> | TokenAdvance<br/><sub>ns/op · allocs/op</sub> | TokenProto<br/><sub>ns/op · allocs/op</sub> | Trend<br/><sub>ns/op vs previous</sub> |
+|---|---|---|---|---|---|---|---|
+| `0da9ba6` | 2026-09-18 | 891.0ns · 3 | 45.6ns · 0 | 152.5ns · 0 | 40.7ns · 0 | 306.9ns · 2 | ▬ +1% |
+| `f6895c8` | 2026-09-17 | 1.20µs · 3 | 24.0ns · 0 | 178.3ns · 0 | 38.3ns · 0 | 374.2ns · 2 | — |
+
+## Trend
+
+One line per benchmark, oldest to newest, scaled to that benchmark's own range —
+so the shapes show movement and cannot be compared BETWEEN benchmarks. Read them for
+direction; read the table for values.
+
+```
+ControllerConcurrent  █▁  1.20µs → 891.0ns  (-26%)
+RingLookup            ▁█  24.0ns → 45.6ns  (+90%)
+SketchCounts          █▁  178.3ns → 152.5ns  (-14%)
+TokenAdvance          ▁█  38.3ns → 40.7ns  (+6%)
+TokenProto            █▁  374.2ns → 306.9ns  (-18%)
+```

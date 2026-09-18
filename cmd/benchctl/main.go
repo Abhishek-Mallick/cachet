@@ -552,9 +552,13 @@ func microbenchCmd(args []string) error {
 		commit = fs.String("commit", "", "commit sha (required)")
 		date   = fs.String("date", "", "commit date, YYYY-MM-DD (defaults to today)")
 		keep   = fs.Int("keep", 25, "how many commits of history to retain")
+		redraw = fs.Bool("rerender", false, "redraw the existing history with the current renderer, adding no row")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *redraw {
+		return rerenderHistory(*out, *keep)
 	}
 	if *commit == "" {
 		return errors.New("benchctl microbench: -commit is required")
@@ -650,6 +654,35 @@ func faultsCmd(args []string) error {
 		return fmt.Errorf("benchctl faults: write %s: %w", outPath, err)
 	}
 	fmt.Printf("wrote %s from %d fault record(s) of %d planned\n", *out, len(records), len(faults.Catalogue))
+	return nil
+}
+
+// rerenderHistory redraws the committed history after a change to the renderer.
+//
+// It records nothing. The rule that every row must come from a CI run on a comparable machine is
+// what makes the table worth reading, and re-rendering does not touch it.
+func rerenderHistory(out string, keep int) error {
+	outPath, err := safeOutputPath(out)
+	if err != nil {
+		return err
+	}
+	//nolint:gosec // G304: outPath is validated by safeOutputPath immediately above.
+	existing, err := os.ReadFile(outPath)
+	if err != nil {
+		return fmt.Errorf("benchctl microbench: read %s: %w", out, err)
+	}
+	redrawn := harness.RerenderBenchTable(existing, keep)
+	if redrawn == string(existing) {
+		fmt.Printf("%s is already current\n", out)
+		return nil
+	}
+	// safeOutputPath rejects absolute paths and anything escaping the working directory. gosec's
+	// analysis is static and cannot see a runtime guard; the guard is the real control.
+	//nolint:gosec // G703: the path is validated by safeOutputPath above.
+	if err := os.WriteFile(outPath, []byte(redrawn), 0o600); err != nil {
+		return fmt.Errorf("benchctl microbench: write %s: %w", outPath, err)
+	}
+	fmt.Printf("re-rendered %s with the current renderer; no row added\n", out)
 	return nil
 }
 

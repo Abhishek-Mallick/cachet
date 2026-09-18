@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,17 +157,24 @@ func RenderBenchTable(existing []byte, row BenchRow, keep int) string {
 	for _, n := range names {
 		fmt.Fprintf(&b, " %s<br/><sub>ns/op · allocs/op</sub> |", strings.TrimPrefix(n, "Benchmark"))
 	}
+	b.WriteString(" Trend<br/><sub>ns/op vs previous</sub> |")
 	b.WriteString("\n|---|---|")
 	for range names {
 		b.WriteString("---|")
 	}
-	b.WriteString("\n")
+	b.WriteString("---|\n")
 
-	for _, r := range unique {
+	indexed := make([]map[string]BenchResult, len(unique))
+	for i, r := range unique {
 		byName := make(map[string]BenchResult, len(r.Results))
 		for _, res := range r.Results {
 			byName[res.Name] = res
 		}
+		indexed[i] = byName
+	}
+
+	for i, r := range unique {
+		byName := indexed[i]
 		fmt.Fprintf(&b, "| `%s` | %s |", r.Commit, r.Date)
 		for _, n := range names {
 			res, ok := byName[n]
@@ -178,9 +186,194 @@ func RenderBenchTable(existing []byte, row BenchRow, keep int) string {
 			}
 			fmt.Fprintf(&b, " %s · %d |", formatNs(res.NsPerOp), res.AllocsPerOp)
 		}
+		// Rows are newest-first, so the commit BEFORE this one is the next row down. The last row
+		// has nothing behind it and gets a gap rather than a 0% claiming no change was measured.
+		if i+1 < len(indexed) {
+			fmt.Fprintf(&b, " %s |", trendCell(byName, indexed[i+1]))
+		} else {
+			b.WriteString(" — |")
+		}
 		b.WriteString("\n")
 	}
+
+	renderTrendSection(&b, unique, names)
 	return b.String()
+}
+
+// sparkRunes are the eight block heights a sparkline is drawn from.
+var sparkRunes = []rune("▁▂▃▄▅▆▇█")
+
+// Sparkline renders a series as one line of block characters.
+//
+// The table answers "what is this number now"; a sparkline answers "what has it been doing", which
+// is the question a regression hunt actually starts from. It is drawn oldest-to-newest so it reads
+// like every other chart, even though the table above it is newest-first.
+//
+// A flat series renders flat. Normalising a series with no variation would turn measurement noise
+// of zero into a dramatic shape, which is the most common case and the worst one to dramatise.
+func Sparkline(values []float64) string {
+	if len(values) == 0 {
+		return ""
+	}
+
+	lo, hi := values[0], values[0]
+	for _, v := range values {
+		lo = math.Min(lo, v)
+		hi = math.Max(hi, v)
+	}
+	if hi == lo {
+		return strings.Repeat(string(sparkRunes[0]), len(values))
+	}
+
+	var b strings.Builder
+	for _, v := range values {
+		idx := int((v - lo) / (hi - lo) * float64(len(sparkRunes)-1))
+		b.WriteRune(sparkRunes[idx])
+	}
+	return b.String()
+}
+
+// geomeanNs is the geometric mean of a commit's ns/op across the named benchmarks.
+//
+// Geometric rather than arithmetic because the benchmarks differ by orders of magnitude: an
+// arithmetic mean would let the slowest one drown out a doubling in every other. Only benchmarks
+// present in BOTH commits are compared, so a newly added benchmark cannot masquerade as a
+// regression.
+func geomeanNs(results map[string]BenchResult, names []string) (float64, bool) {
+	sum, n := 0.0, 0
+	for _, name := range names {
+		r, ok := results[name]
+		if !ok || r.NsPerOp <= 0 {
+			continue
+		}
+		sum += math.Log(r.NsPerOp)
+		n++
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return math.Exp(sum / float64(n)), true
+}
+
+// trendCell renders one row's change against the commit before it.
+//
+// The bar is a reading aid, not a measurement: the percentage is the number, and the header above
+// this table is explicit that ns/op on a shared runner is a regression signal rather than a
+// published figure. Allocation deltas are called out separately because those ARE trustworthy — a
+// change there is a real change in the code every time.
+func trendCell(cur, prev map[string]BenchResult) string {
+	shared := make([]string, 0, len(cur))
+	for name := range cur {
+		if _, ok := prev[name]; ok {
+			shared = append(shared, name)
+		}
+	}
+	sort.Strings(shared)
+
+	curMean, ok1 := geomeanNs(cur, shared)
+	prevMean, ok2 := geomeanNs(prev, shared)
+	if !ok1 || !ok2 || prevMean == 0 {
+		return "—"
+	}
+
+	pct := (curMean/prevMean - 1) * 100
+
+	var allocDelta int64
+	for _, name := range shared {
+		allocDelta += cur[name].AllocsPerOp - prev[name].AllocsPerOp
+	}
+
+	cell := fmt.Sprintf("%s %+.0f%%", trendBar(pct), pct)
+	if allocDelta != 0 {
+		cell += fmt.Sprintf(" · allocs %+d", allocDelta)
+	}
+	return cell
+}
+
+// trendBar draws the magnitude of a change, growing in the direction of the change.
+//
+// Slower is drawn with full blocks and faster with light ones, so a regression is visible without
+// reading the sign. A change under 2% draws nothing: run-to-run noise on a shared runner is bigger
+// than that, and drawing it would invite reading noise as signal.
+func trendBar(pct float64) string {
+	mag := math.Abs(pct)
+	switch {
+	case mag < 2:
+		return "▬"
+	case mag < 10:
+		return pick(pct, "▲", "▽")
+	case mag < 50:
+		return pick(pct, "▲▲", "▽▽")
+	default:
+		return pick(pct, "▲▲▲", "▽▽▽")
+	}
+}
+
+func pick(pct float64, slower, faster string) string {
+	if pct > 0 {
+		return slower
+	}
+	return faster
+}
+
+// renderTrendSection draws one sparkline per benchmark, oldest to newest.
+func renderTrendSection(b *strings.Builder, rows []BenchRow, names []string) {
+	if len(rows) < 2 {
+		return
+	}
+
+	b.WriteString("\n## Trend\n\n")
+	b.WriteString("One line per benchmark, oldest to newest, scaled to that benchmark's own range —\n")
+	b.WriteString("so the shapes show movement and cannot be compared BETWEEN benchmarks. Read them for\n")
+	b.WriteString("direction; read the table for values.\n\n")
+	b.WriteString("```\n")
+
+	width := 0
+	for _, n := range names {
+		width = max(width, len(strings.TrimPrefix(n, "Benchmark")))
+	}
+
+	for _, name := range names {
+		var series []float64
+		// rows are newest-first; a chart reads the other way.
+		for i := len(rows) - 1; i >= 0; i-- {
+			for _, res := range rows[i].Results {
+				if res.Name == name {
+					series = append(series, res.NsPerOp)
+				}
+			}
+		}
+		if len(series) < 2 {
+			continue
+		}
+		oldest, newest := series[0], series[len(series)-1]
+		pct := 0.0
+		if oldest > 0 {
+			pct = (newest/oldest - 1) * 100
+		}
+		// The magnitude sits beside the shape deliberately. Scaled to its own range, a sparkline of
+		// two points spans top to bottom whether the change was 1% or 1000%.
+		fmt.Fprintf(b, "%-*s  %s  %s → %s  (%+.0f%%)\n",
+			width, strings.TrimPrefix(name, "Benchmark"), Sparkline(series),
+			formatNs(oldest), formatNs(newest), pct)
+	}
+	b.WriteString("```\n")
+}
+
+// RerenderBenchTable redraws an existing history with the current renderer, adding no row.
+//
+// A change to this package's output format would otherwise leave the committed file stale until
+// some unrelated commit happened to touch the request path. Re-rendering is explicitly not
+// recording: nothing here measures anything, so the honesty rule that a row must come from CI is
+// untouched.
+func RerenderBenchTable(existing []byte, keep int) string {
+	rows := parseBenchTable(existing)
+	if len(rows) == 0 {
+		return string(existing)
+	}
+	// Feed the newest row back through the normal path; de-duplication by commit collapses it onto
+	// the row already there, so the history is redrawn rather than extended.
+	return RenderBenchTable(existing, rows[0], keep)
 }
 
 // benchNames is every benchmark seen across the kept rows, in a stable order.
@@ -215,7 +408,18 @@ func parseBenchTable(existing []byte) []BenchRow {
 			names = nil
 			for _, cell := range splitRow(line)[2:] {
 				name, _, _ := strings.Cut(cell, "<br/>")
-				names = append(names, "Benchmark"+strings.TrimSpace(name))
+				name = strings.TrimSpace(name)
+				// Trend is a rendering of the other columns, not a measurement.
+				//
+				// Belt and braces, and labelled as such: nothing downstream currently records a
+				// result for it either, because parseNs rejects a cell like "▲▲ +12%". This skip is
+				// what keeps that true if the trend cell ever starts carrying a duration — at which
+				// point the column would otherwise be read back as a benchmark and re-rendered as
+				// one. TestTheTrendColumnSurvivesARoundTrip pins the column count that would break.
+				if name == "Trend" {
+					continue
+				}
+				names = append(names, "Benchmark"+name)
 			}
 		case strings.HasPrefix(line, "| `"):
 			cells := splitRow(line)

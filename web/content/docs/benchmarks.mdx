@@ -1,0 +1,124 @@
+---
+title: Benchmarks
+description: What has been measured, what has not, and why some of these charts deliberately show a spread instead of a number.
+---
+
+Every figure on this page comes from a script in the repository, with a provenance line naming the
+host. Nothing here is typed by hand, and nothing is filled in from a run that could not be trusted.
+
+<Callout type="warn" title="Read this before the charts">
+  These were measured on a **Docker Desktop VM on macOS** (arm64, 10 cores), whose virtualised
+  filesystem gives I/O latency that is neither predictable nor representative — and MyRocks is
+  I/O-sensitive.
+
+  Comparisons **between bars** hold, because every bar was measured identically. The absolute values
+  do not transfer to your hardware. Headline numbers move to a dedicated Linux host before they are
+  published as results.
+</Callout>
+
+## The result: load, not latency
+
+Database load is the cost the caching claim actually rests on, and it is where the effect is large
+enough to be unambiguous. Steady-state origin QPS at 500 rps, θ=0.99:
+
+<Bars
+  data={[
+    { label: 'No cache', value: 760 },
+    { label: 'TTL only', value: 46 },
+    { label: '+ CDC invalidation', value: 78, note: '−90%' },
+  ]}
+  highlight="+ CDC invalidation"
+  format={(n) => `${n} QPS`}
+/>
+
+Note which bar is smallest. **TTL-only reaches lower origin load than correct invalidation** — it is
+cheaper precisely to the extent that it has stopped noticing writes. The 78 QPS bar is the honest
+one: it pays 32 QPS for the difference below.
+
+## What that correctness costs, and buys
+
+<GroupedBars
+  categories={['TTL only', '+ CDC']}
+  series={[
+    { label: 'Hit rate (%)', values: [93.9, 89.7], muted: true },
+    { label: 'p99 staleness (ms)', values: [10070, 34.98] },
+  ]}
+  format={(n) => (n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${n}`)}
+/>
+
+A TTL cache reaches the better hit rate — 93.9% against 89.7% — and serves data up to **10.07
+seconds stale**. Exact invalidation gives back 4.2 points of hit rate and brings p99 staleness to
+**34.98 ms**: 288× better.
+
+## Both invalidation paths, measured separately
+
+Neither path is credited with the other's work. The medians are indistinguishable; the entire
+difference is in the tail, because synchronous invalidation is bounded by the write it rides on
+while CDC adds a variable delivery delay.
+
+<GroupedBars
+  categories={['p50', 'p90', 'p99', 'p99.9']}
+  series={[
+    { label: 'CDC only', values: [5.6, 14.53, 34.98, 101.5], muted: true },
+    { label: 'Write path + CDC backstop', values: [6.28, 9.8, 17.41, 26.05] },
+  ]}
+  format={(n) => `${n}ms`}
+/>
+
+<sub>250 observations each, none failing to converge.</sub>
+
+## The chart we will not draw as a result
+
+Read p99 is **not measurable** in this environment, and the honest way to show that is to draw the
+spread rather than the midpoint:
+
+<RangeBars
+  data={[
+    { label: 'No cache', value: 15.2, low: 12.78, high: 17.87 },
+    { label: 'TTL only', value: 63.81, low: 10.35, high: 77.18 },
+    { label: '+ CDC invalidation', value: 16.51, low: 15.23, high: 27.41 },
+  ]}
+/>
+
+The bars overlap almost entirely. **When the spread exceeds the effect, nothing has been measured** —
+so this is reported as a non-result rather than rounded into a win. Two runs, one of each
+configuration, would have produced a confident and false claim.
+
+This is also expected rather than disappointing. At 500 rps against three idle shards, an uncached
+point lookup is already fast: the cache removes a round trip that was not the bottleneck. It removes
+*load*, not wall time. A latency win should appear once the origin is under enough pressure to
+queue, which is what the stampede workload exists to create.
+
+## Per-commit regression signal
+
+Separately from published figures, CI runs the microbenchmarks on every push that touches the
+request path and appends a row to `bench/PER-COMMIT.md`, with a sparkline per benchmark.
+
+Those run on shared GitHub runners, so they are a **regression signal and not a measurement**. The
+allocations column is the trustworthy one — allocation counts do not depend on how busy the machine
+is. It earns its place: an adaptive-admission defect that cost 630 ms of tail latency showed up
+there as a 4× regression.
+
+<Bars
+  data={[
+    { label: 'Sketch counts, before', value: 398 },
+    { label: 'Sketch counts, after', value: 91 },
+    { label: 'Controller, before', value: 955 },
+    { label: 'Controller, after', value: 402 },
+  ]}
+  format={(n) => `${n} ns/op`}
+/>
+
+That defect passed every correctness test. A lock convoy surfaces as a tail, not an average, which
+is why only benchmarking could have found it.
+
+## Reproducing these
+
+```bash
+make env-up          # three MyRocks shards, Valkey, Grafana
+make bench           # the full matrix; writes JSON to bench/results/
+make bench-report    # regenerates the README table from that JSON
+```
+
+`cachetctl bench quick` runs the same harness against **your** database, so you can get these
+numbers for your own workload rather than trusting these.

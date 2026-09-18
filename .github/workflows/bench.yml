@@ -22,6 +22,11 @@ on:
     paths:
       - 'internal/**'
       - 'pkg/**'
+      # The generator too: a change to how the history is rendered must redraw the history, or the
+      # committed file stays in the old format until some unrelated commit happens to touch the
+      # request path.
+      - 'bench/harness/**'
+      - 'cmd/benchctl/**'
       - '.github/workflows/bench.yml'
 
 permissions:
