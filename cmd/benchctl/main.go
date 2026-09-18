@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
 	"github.com/Abhishek-Mallick/cachet/bench/harness"
+	"github.com/Abhishek-Mallick/cachet/internal/faults"
 )
 
 func main() {
@@ -35,7 +37,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: benchctl <run|probe|report|guard|microbench> [flags]")
+		return errors.New("usage: benchctl <run|probe|report|guard|microbench|faults> [flags]")
 	}
 	switch os.Args[1] {
 	case "run":
@@ -46,6 +48,8 @@ func run() error {
 		return probeStaleness(os.Args[2:])
 	case "microbench":
 		return microbenchCmd(os.Args[2:])
+	case "faults":
+		return faultsCmd(os.Args[2:])
 	case "guard":
 		return guard(os.Args[2:])
 	default:
@@ -608,6 +612,44 @@ func microbenchCmd(args []string) error {
 		return fmt.Errorf("benchctl microbench: write %s: %w", outPath, err)
 	}
 	fmt.Printf("recorded %d benchmark(s) for %s in %s\n", len(results), short, *out)
+	return nil
+}
+
+// faultsCmd renders FAULTS.md from what the chaos suite recorded.
+//
+// The input is written by the tests themselves, on their success path only, so a fault that was not
+// proven produces no entry. That is what keeps the document from drifting into a list of things
+// somebody believes are true.
+func faultsCmd(args []string) error {
+	fs := flag.NewFlagSet("faults", flag.ExitOnError)
+	var (
+		in  = fs.String("in", "test/chaos/testdata/faults.json", "fault records written by the chaos suite")
+		out = fs.String("out", "FAULTS.md", "document to write")
+	)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	raw, err := os.ReadFile(filepath.Clean(*in))
+	if err != nil {
+		return fmt.Errorf("benchctl faults: %w (run `make test-chaos` first)", err)
+	}
+	var records []faults.Record
+	if err := json.Unmarshal(raw, &records); err != nil {
+		return fmt.Errorf("benchctl faults: parse %s: %w", *in, err)
+	}
+	if len(records) == 0 {
+		return errors.New("benchctl faults: no fault records; refusing to write a document claiming coverage of nothing")
+	}
+
+	outPath, err := safeOutputPath(*out)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(outPath, []byte(faults.Render(records)), 0o600); err != nil {
+		return fmt.Errorf("benchctl faults: write %s: %w", outPath, err)
+	}
+	fmt.Printf("wrote %s from %d fault record(s) of %d planned\n", *out, len(records), len(faults.Catalogue))
 	return nil
 }
 

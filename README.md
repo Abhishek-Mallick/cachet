@@ -213,7 +213,13 @@ failed is proving nothing.
 
 ```bash
 make test-consistency     # the matrix, plus the test that proves the matrix works
+make test-chaos           # injected faults, and what explains each one
 ```
+
+Failure behaviour gets the same treatment. [`FAULTS.md`](./FAULTS.md) is generated from injected
+faults, and the bar for an entry is not that Cachet survived — it is that the entry names the
+command or metric telling an operator *why*. Each one also carries the evidence its injection
+actually fired, since a toxic that silently failed to apply produces a green test asserting nothing.
 
 Two results worth stating plainly, because they cut against the product's own pitch:
 
@@ -288,6 +294,7 @@ it rides on, while CDC adds a variable delivery delay:
 | 📖 [**What is Cachet?**](./documentation/WHAT-IS-CACHET.md) | The intent, the problem it solves, and why the approach is better. **Start here.** |
 | 🚀 [**Using Cachet**](./documentation/USING-CACHET.md) | Quick start, configuration, the gRPC API, consistency levels, benchmarking, troubleshooting |
 | [`CONSISTENCY.md`](./CONSISTENCY.md) | The normative consistency model — every level's guarantee, non-guarantee, and the test that catches its violation |
+| [`FAULTS.md`](./FAULTS.md) | Injected faults, and the command or metric that explains each one |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Engineering standards and the CI gate |
 
 | [`docs/cachet-benchmarking.md`](./docs/cachet-benchmarking.md) | How every published number is produced, and the traps that make benchmarks fiction |

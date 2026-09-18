@@ -6,6 +6,7 @@
 package harness
 
 import (
+	"cmp"
 	"context"
 	"net"
 	"os"
@@ -51,7 +52,15 @@ type Cluster struct {
 	stop          func()
 	originReads   func() (int, error)
 	leaseOutcomes func(string) int
+	cacheOps      func(op, result string) int
 }
+
+// CacheOpsForTest reports how many cache operations ended with the given result.
+//
+// The chaos suite uses it to prove an injected fault actually reached the engine: a cache made
+// unreachable that produces zero "error" results was not made unreachable, and every assertion
+// after that point is vacuous.
+func (c *Cluster) CacheOpsForTest(op, result string) int { return c.cacheOps(op, result) }
 
 // Stop shuts the engine down and waits for it to drain. It is safe to call more than once, so a
 // test can stop the cluster explicitly and still rely on cleanup.
@@ -94,6 +103,17 @@ type CacheOptions struct {
 	// rather than writing a thousand rows to provoke it.
 	MaxAffectedKeys int
 
+	// Shards overrides the databases the engine opens. Nil takes DefaultShards.
+	//
+	// The chaos suite sets this to route the engine through Toxiproxy, so a fault can be injected
+	// between the engine and a shard without the engine being aware of it. Nothing else should need
+	// it: a suite that quietly points at different databases is a suite whose green result does not
+	// transfer.
+	Shards []config.Shard
+
+	// CacheAddr overrides the cache address. Empty takes DefaultCacheAddr. Same rationale as Shards.
+	CacheAddr string
+
 	// PreserveCache keeps whatever the cache already holds instead of flushing it at startup.
 	//
 	// Needed by failover tests, which start a SECOND engine against state the first one left
@@ -121,7 +141,7 @@ func StartCachedWith(ctx context.Context, t *testing.T, opts CacheOptions, liste
 
 	EnsureEnvironment(ctx, t)
 	c, err := cache.New(ctx, cache.Options{
-		Addresses: []string{DefaultCacheAddr},
+		Addresses: []string{cmp.Or(opts.CacheAddr, DefaultCacheAddr)},
 		TTL:       opts.TTL,
 		LeaseTTL:  opts.LeaseTTL,
 	})
@@ -153,9 +173,13 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 
 	EnsureEnvironment(ctx, t)
 
-	shards := make(map[storage.ShardID]*storage.Shard, len(DefaultShards))
-	ids := make([]storage.ShardID, 0, len(DefaultShards))
-	for _, sc := range DefaultShards {
+	shardCfg := opts.Shards
+	if shardCfg == nil {
+		shardCfg = DefaultShards
+	}
+	shards := make(map[storage.ShardID]*storage.Shard, len(shardCfg))
+	ids := make([]storage.ShardID, 0, len(shardCfg))
+	for _, sc := range shardCfg {
 		id := storage.ShardID(sc.ID)
 		sh, err := storage.OpenShard(ctx, id, sc.DSN, storage.NewClock(time.Now))
 		if err != nil {
@@ -230,6 +254,9 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		},
 		leaseOutcomes: func(outcome string) int {
 			return int(testutil.ToFloat64(metrics.Leases().WithLabelValues(outcome)))
+		},
+		cacheOps: func(op, result string) int {
+			return int(testutil.ToFloat64(metrics.CacheOps().WithLabelValues(op, result)))
 		},
 	}
 }

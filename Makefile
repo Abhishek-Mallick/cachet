@@ -107,8 +107,16 @@ test-e2e: ## Full-stack scenarios against test/env
 	$(GOTEST) -tags=e2e -timeout=30m ./test/e2e/...
 
 .PHONY: test-chaos
-test-chaos: ## The 9 injected faults
+test-chaos: ## The injected faults (needs env-chaos-up)
 	$(GOTEST) -tags=chaos -timeout=45m ./test/chaos/...
+
+.PHONY: env-chaos-up
+env-chaos-up: ## Bring the stack up with Toxiproxy in front of every dependency
+	$(COMPOSE) $(F_BASE) $(F_CHAOS) up -d --wait
+
+.PHONY: faults
+faults: ## Regenerate FAULTS.md from what the chaos suite recorded
+	$(GO) run ./cmd/benchctl faults
 
 .PHONY: test-all
 test-all: test-unit test-integration test-consistency test-e2e ## Everything, in dependency order

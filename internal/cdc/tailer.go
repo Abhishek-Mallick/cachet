@@ -47,12 +47,28 @@ type Options struct {
 	// so this is a throughput/recovery trade rather than a correctness one.
 	CheckpointEvery time.Duration
 
+	// InvalidateRetryFor bounds retrying one invalidation against an unreachable cache. Zero takes
+	// defaultInvalidateRetryFor. See invalidate for why this is not simply best-effort.
+	InvalidateRetryFor time.Duration
+
 	Logger *slog.Logger
 
 	// OnInvalidate is called after each invalidation attempt. It exists so tests can observe
 	// progress without polling the cache, and so the binary can count applied versus rejected.
 	OnInvalidate func(key string, version uint64, applied bool)
 }
+
+const (
+	defaultCheckpointEvery = 5 * time.Second
+
+	// defaultInvalidateRetryFor bounds how long the tailer will keep trying to deliver one
+	// invalidation. Long enough to ride out a cache restart or a failover; short enough that a
+	// genuinely dead cache freezes the checkpoint and says so rather than stalling forever.
+	defaultInvalidateRetryFor = 30 * time.Second
+
+	initialInvalidateBackoff = 100 * time.Millisecond
+	maxInvalidateBackoff     = 2 * time.Second
+)
 
 // Tailer streams one shard's binlog and invalidates the rows it sees change.
 type Tailer struct {
@@ -63,6 +79,35 @@ type Tailer struct {
 	mu       sync.Mutex
 	position Position
 	dirty    bool
+	// frozen stops the checkpoint advancing past an invalidation that could not be delivered.
+	// Everything after that point must be replayed on restart, which is safe because invalidation
+	// is a versioned compare-and-set and therefore idempotent.
+	frozen   bool
+	frozenAt Position
+}
+
+// Frozen reports whether the tailer has stopped advancing its checkpoint, and where.
+//
+// A frozen checkpoint is the visible symptom of an invalidation that never landed. It is what turns
+// "some rows are stale and nobody knows why" into a question an operator can answer: `cachetctl
+// checkpoints` shows a position that has stopped moving while the binlog has not.
+func (t *Tailer) Frozen() (Position, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.frozenAt, t.frozen
+}
+
+// freeze pins the checkpoint at the last position known to be fully applied.
+func (t *Tailer) freeze(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.frozen {
+		return
+	}
+	t.frozen = true
+	t.frozenAt = t.position
+	t.log.Error("invalidation could not be delivered; freezing the checkpoint so a restart replays it",
+		"shard", t.opts.ShardID, "key", key, "position", t.frozenAt)
 }
 
 // New builds a Tailer and connects to the shard.
@@ -80,7 +125,10 @@ func New(opts Options) (*Tailer, error) {
 		return nil, errors.New("cdc: no table configured")
 	}
 	if opts.CheckpointEvery <= 0 {
-		opts.CheckpointEvery = 5 * time.Second
+		opts.CheckpointEvery = defaultCheckpointEvery
+	}
+	if opts.InvalidateRetryFor == 0 {
+		opts.InvalidateRetryFor = defaultInvalidateRetryFor
 	}
 	log := opts.Logger
 	if log == nil {
@@ -206,6 +254,11 @@ func (t *Tailer) saveLoop(ctx context.Context, done <-chan struct{}) {
 func (t *Tailer) saveIfDirty() {
 	t.mu.Lock()
 	p, dirty := t.position, t.dirty
+	if t.frozen {
+		// Record the last position everything before which is known to have been applied. Replaying
+		// from here after a restart re-delivers the invalidation that was lost.
+		p = t.frozenAt
+	}
 	t.dirty = false
 	t.mu.Unlock()
 
@@ -220,17 +273,51 @@ func (t *Tailer) saveIfDirty() {
 	}
 }
 
-// invalidate tombstones one changed row.
+// invalidate tombstones one changed row, retrying while the cache is unreachable.
+//
+// Dropping the event on the first error was the original behaviour and it was wrong in a specific,
+// quiet way. During a cache partition the write path's invalidation fails too, so BOTH paths lose
+// the event; the entry then survives until its TTL with nothing reporting it. A backstop that a
+// cache blip defeats is not a backstop.
+//
+// Retrying blocks this shard's stream for up to InvalidateRetryFor. That is deliberate: the tailer
+// cannot honestly record progress it has not made, and stalling one shard's binlog consumption is a
+// smaller harm than serving a stale row indefinitely. If the budget runs out, the checkpoint is
+// frozen so a restart replays from before the lost event.
 func (t *Tailer) invalidate(ctx context.Context, id, version uint64) {
 	key := t.opts.Table + ":" + strconv.FormatUint(id, 10)
 
-	applied, err := t.opts.Cache.Tombstone(ctx, key, version)
-	if err != nil {
-		t.log.Warn("invalidation failed", "shard", t.opts.ShardID, "key", key, "err", err)
-		return
-	}
-	if t.opts.OnInvalidate != nil {
-		t.opts.OnInvalidate(key, version, applied)
+	backoff := initialInvalidateBackoff
+	deadline := time.Now().Add(t.opts.InvalidateRetryFor)
+	for attempt := 1; ; attempt++ {
+		applied, err := t.opts.Cache.Tombstone(ctx, key, version)
+		if err == nil {
+			if attempt > 1 {
+				t.log.Info("invalidation delivered after retrying",
+					"shard", t.opts.ShardID, "key", key, "attempts", attempt)
+			}
+			if t.opts.OnInvalidate != nil {
+				t.opts.OnInvalidate(key, version, applied)
+			}
+			return
+		}
+
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			t.log.Warn("invalidation failed", "shard", t.opts.ShardID, "key", key,
+				"attempts", attempt, "err", err)
+			t.freeze(key)
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			t.freeze(key)
+			return
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > maxInvalidateBackoff {
+			backoff = maxInvalidateBackoff
+		}
 	}
 }
 
