@@ -96,9 +96,9 @@ Two paths, deliberately separable so neither gets credit for the other's work:
   made directly to the database by migrations and admin scripts.
 
 Both are versioned compare-and-set, so replaying the binlog is idempotent and a restarted tailer
-cannot undo newer state. That is not an aspiration — it is a test that runs on every build: the
-tailer is killed mid-stream with writes in flight, restarted from its checkpoint, and then
-deliberately rewound so it replays events it has already applied.
+cannot undo newer state. That is not an aspiration — it is an executed test (`make test-e2e`,
+`make test-chaos`): the tailer is killed mid-stream with writes in flight, restarted from its
+checkpoint, and then deliberately rewound so it replays events it has already applied.
 
 ### 2.5 · A cache ring that is not the database's ring
 
@@ -148,8 +148,8 @@ The common alternative — deduplicating concurrent fills — fixes *ordering*: 
 overwrite a newer value. It does nothing for *admission*. Ten thousand simultaneous misses on a hot
 key still all reach the database, which is precisely when you can least afford them.
 
-Asserted on every build: 500 concurrent readers of one invalidated hot key produce **one** origin
-read; with waiting disabled, 198 of 200 reach the database.
+Asserted by `make test-e2e`: 500 concurrent readers of one invalidated hot key produce **one**
+origin read; with waiting disabled, 198 of 200 reach the database.
 
 ### 4 · Sextant — continuous consistency verification 🔭
 

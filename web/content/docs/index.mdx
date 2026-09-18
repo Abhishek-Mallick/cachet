@@ -33,9 +33,10 @@ and can invalidate them before the write is acknowledged.
 
 Cachet is **pre-1.0** and developed in the open under Apache 2.0.
 
-Everything documented here is implemented and covered by a consistency conformance suite that runs
-on every build — including a test that deliberately breaks the cache and requires the suite to catch
-it, because a consistency test that has never failed is proving nothing.
+Everything documented here is implemented and covered by a consistency conformance suite you can
+run yourself with `make test-consistency` — including a test that deliberately breaks the cache and
+requires the suite to catch it, because a consistency test that has never failed is proving
+nothing.
 
 Published benchmark figures are a separate matter and deliberately sparse: several configurations
 have working implementations and no published number, because they have not yet been measured on a

@@ -110,12 +110,28 @@ A pull request merges only when all of this is green. No `--no-verify`.
 | Tidy | `make tidy` |
 | Unit + race | `go test -race -count=2 ./...` |
 | Integration | `make test-integration` |
-| Consistency | `make test-consistency` |
 | Env budget | `make env-up` in under 90 s |
 | Build matrix | linux/amd64, linux/arm64, darwin/arm64 |
 | Vulnerabilities | `make vuln` |
 
 `-count=2` is deliberate: it catches tests that pass only because of state left by their first run.
+
+### Not yet gated, and run locally
+
+These suites need the compose stack rather than testcontainers, so they are not in CI today. **Run
+them yourself before opening a pull request that touches the read path**, and say in the PR which
+ones you ran.
+
+| Suite | Command | Why it matters |
+|---|---|---|
+| Consistency | `make test-consistency` | The conformance matrix, including the cells required to FAIL against a naive cache |
+| End to end | `make test-e2e` | Leases, CDC, shadow mode, shutdown, topology |
+| Faults | `make env-chaos-up && make test-chaos` | Regenerates the evidence behind `FAULTS.md` |
+
+This is a known gap and it is tracked, not accepted: the conformance matrix and the fault record are
+the two artefacts this project's credibility rests on, and neither is currently enforced by anything
+but discipline. A suite that only runs when somebody remembers is a suite that will eventually be
+wrong without anyone noticing.
 
 ---
 

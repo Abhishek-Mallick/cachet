@@ -266,8 +266,8 @@ is typed by hand.
 
 **The empty rows have working implementations and no published figure.** They stay blank until they
 can be measured on a host that is not a laptop VM — filling them from a noisy machine would produce
-numbers that look like measurements and are artefacts. The feature claims above rest on tests that
-run on every build, not on this table.
+numbers that look like measurements and are artefacts. The feature claims above rest on executed
+tests — `make test-consistency`, `make test-e2e`, `make test-chaos` — not on this table.
 
 **Origin QPS** is steady-state database load — the cost metric the caching claim actually rests on.
 
