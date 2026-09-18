@@ -1,0 +1,29 @@
+name: Benchmark result
+description: A measurement that disagrees with a published figure
+labels: [benchmark]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Published figures are measured on a disclosed host and comparisons hold *between rows*
+        rather than in absolute terms. A number that differs on your hardware is expected; a
+        number that differs in **direction** is a finding.
+  - type: textarea
+    id: numbers
+    attributes:
+      label: What you measured
+      description: Include the spread, not just the midpoint. When the spread exceeds the effect, nothing has been measured.
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: host
+    attributes:
+      label: Host
+      description: CPU, cores, memory, storage, whether anything else was running. Load average during the run, if you have it.
+    validations: { required: true }
+  - type: input
+    id: command
+    attributes:
+      label: How it was produced
+      description: "`make bench`, `cachetctl bench quick`, or the exact command."
+    validations: { required: true }

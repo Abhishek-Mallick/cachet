@@ -1,0 +1,93 @@
+{{- if .Values.flux.enabled -}}
+{{/*
+The CDC tailer: exactly one, always.
+
+Not a Deployment with replicas and not a DaemonSet. Two tailers on the same shard share a
+replication id and fight over the connection, and the failure looks like a CDC bug rather than a
+collision. Recreate rather than RollingUpdate for the same reason.
+*/}}
+apiVersion: apps/v1
+kind: {{ if .Values.flux.persistence.enabled }}StatefulSet{{ else }}Deployment{{ end }}
+metadata:
+  name: {{ include "cachet.fullname" . }}-flux
+  labels:
+    {{- include "cachet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: flux
+spec:
+  replicas: 1
+  {{- if .Values.flux.persistence.enabled }}
+  serviceName: {{ include "cachet.fullname" . }}-flux
+  {{- else }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cachet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: flux
+  template:
+    metadata:
+      labels:
+        {{- include "cachet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: flux
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "cachet.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: flux
+          image: {{ include "cachet.image" (dict "root" . "binary" "flux") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/cachet/config.yaml
+            - --state-dir=/var/lib/cachet
+          env:
+            {{- if .Values.existingSecret }}
+            - name: CACHET_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.username }}
+            - name: CACHET_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.password }}
+            {{- end }}
+          volumeMounts:
+            - name: cachet-config
+              mountPath: /etc/cachet
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/cachet
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.flux.resources | nindent 12 }}
+      volumes:
+        - name: cachet-config
+          configMap:
+            name: {{ include "cachet.fullname" . }}
+        {{- if not .Values.flux.persistence.enabled }}
+        # Ephemeral checkpoints mean a restart resumes from the CURRENT binlog position and silently
+        # skips every write made while the tailer was down. Acceptable for a demo, never for
+        # production — which is why persistence defaults to on.
+        - name: state
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.flux.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.flux.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.flux.persistence.size }}
+  {{- end }}
+{{- end -}}

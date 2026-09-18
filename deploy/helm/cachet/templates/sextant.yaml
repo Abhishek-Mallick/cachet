@@ -1,0 +1,64 @@
+{{- if .Values.sextant.enabled -}}
+{{/*
+The verifier. Shadow mode by default: it reads and checks without serving, so it can be pointed at
+a deployment you are not reading through and still report what your consistency would have been.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cachet.fullname" . }}-sextant
+  labels:
+    {{- include "cachet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sextant
+spec:
+  replicas: {{ .Values.sextant.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cachet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: sextant
+  template:
+    metadata:
+      labels:
+        {{- include "cachet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: sextant
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "cachet.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: sextant
+          image: {{ include "cachet.image" (dict "root" . "binary" "sextant") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/cachet/config.yaml
+            {{- if .Values.sextant.shadow }}
+            - -shadow
+            {{- end }}
+          env:
+            {{- if .Values.existingSecret }}
+            - name: CACHET_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.username }}
+            - name: CACHET_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.password }}
+            {{- end }}
+          volumeMounts:
+            - name: cachet-config
+              mountPath: /etc/cachet
+              readOnly: true
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.sextant.resources | nindent 12 }}
+      volumes:
+        - name: cachet-config
+          configMap:
+            name: {{ include "cachet.fullname" . }}
+{{- end -}}

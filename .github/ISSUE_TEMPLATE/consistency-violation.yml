@@ -1,0 +1,42 @@
+name: Consistency violation
+description: A read returned something its consistency level should not have allowed
+labels: [consistency, bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most important kind of report this project can receive, and it is worth more
+        than a performance regression.
+
+        If the violation is reachable by an untrusted caller, please report it privately instead:
+        see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: dropdown
+    id: level
+    attributes:
+      label: Consistency level requested
+      options: [STRONG, SESSION, "BOUNDED(t)", EVENTUAL]
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the level promises, and what you saw instead
+      description: Quote the guarantee from CONSISTENCY.md if you can — it makes the disagreement precise.
+    validations: { required: true }
+  - type: textarea
+    id: sextant
+    attributes:
+      label: Sextant trace, if you have one
+      description: A violation carries the trace that explains it. `sextant` output, or the relevant metrics.
+      render: text
+  - type: textarea
+    id: inspect
+    attributes:
+      label: "`cachetctl inspect <key>` for the affected key"
+      description: The fill version against the row version is usually the whole story.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`cachetctl version`, or the image digest."
+    validations: { required: true }

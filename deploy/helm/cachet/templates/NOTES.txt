@@ -1,0 +1,49 @@
+Cachet {{ .Chart.AppVersion }} installed as {{ .Release.Name }}.
+
+{{ if eq .Values.topology "sidecar" -}}
+TOPOLOGY: sidecar (the benchmarked default)
+
+This release deployed the shared pieces{{ if .Values.flux.enabled }} — the CDC tailer{{ end }}{{ if .Values.sextant.enabled }} and the verifier{{ end }} — but NOT the engine. A sidecar belongs to
+your pod, so add it to your own Deployment:
+
+    spec:
+      template:
+        spec:
+          containers:
+            - name: your-app
+              volumeMounts:
+                - name: cachet-socket
+                  mountPath: {{ dir .Values.engine.socketPath }}
+            {{ "{{-" }} include "cachet.sidecar" (dict "root" .) | nindent 12 {{ "}}" }}
+          volumes:
+            - name: cachet-socket
+              emptyDir: {}
+            - name: cachet-config
+              configMap:
+                name: {{ include "cachet.fullname" . }}
+
+Then dial it:
+
+    cachet.Dial(ctx, "unix://{{ .Values.engine.socketPath }}")
+
+{{- else -}}
+TOPOLOGY: service tier
+
+    cachet.Dial(ctx, "tcp://{{ include "cachet.fullname" . }}:{{ .Values.engine.grpcPort }}")
+
+This shape adds a network hop to every read. The sidecar measured ~15% better at p99 and is what
+the published benchmarks use.
+{{- end }}
+
+{{ if not .Values.image.digest -}}
+WARNING: no image digest pinned. Images are signed by digest, and a tag can be moved after signing.
+Set image.digest for anything you actually deploy.
+{{- end }}
+
+{{ if and .Values.flux.enabled (not .Values.flux.persistence.enabled) -}}
+WARNING: flux.persistence is off. A tailer restart will resume from the CURRENT binlog position and
+silently skip every write made while it was down.
+{{- end }}
+
+Verify before you trust: run sextant in shadow mode and read the per-level consistency numbers
+before routing anything through the cache.

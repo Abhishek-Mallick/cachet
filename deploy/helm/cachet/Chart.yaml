@@ -1,0 +1,17 @@
+apiVersion: v2
+name: cachet
+description: An integrated read cache for sharded OLTP databases that proves its own consistency
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/Abhishek-Mallick/cachet
+icon: https://raw.githubusercontent.com/Abhishek-Mallick/cachet/main/.github/assets/cachet-logo.png
+sources:
+  - https://github.com/Abhishek-Mallick/cachet
+maintainers:
+  - name: Abhishek-Mallick
+    url: https://github.com/Abhishek-Mallick
+keywords: [cache, mysql, consistency, sharding, read-cache]
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "true"

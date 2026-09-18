@@ -118,6 +118,25 @@ env-chaos-up: ## Bring the stack up with Toxiproxy in front of every dependency
 faults: ## Regenerate FAULTS.md from what the chaos suite recorded
 	$(GO) run ./cmd/benchctl faults
 
+.PHONY: release-check
+release-check: ## Validate the release pipeline without publishing anything
+	@set -euo pipefail; \
+	docker run --rm -v "$$PWD":/w -w /w goreleaser/goreleaser:latest check; \
+	docker run --rm -v "$$PWD/deploy/helm":/charts alpine/helm:latest lint /charts/cachet; \
+	docker run --rm -v "$$PWD/deploy/helm":/charts alpine/helm:latest template rel /charts/cachet >/dev/null; \
+	docker run --rm -v "$$PWD/deploy/helm":/charts alpine/helm:latest template rel /charts/cachet --set topology=service >/dev/null; \
+	echo "release config valid: goreleaser + helm (both topologies)"
+
+.PHONY: release-snapshot
+release-snapshot: ## Build every release artefact locally, publishing nothing
+	docker run --rm -v "$$PWD":/w -w /w goreleaser/goreleaser:latest \
+	  release --snapshot --clean --skip=sign,sbom,publish,validate
+
+.PHONY: image
+image: ## Build one container image locally: make image BINARY=cachet
+	docker build --build-arg BINARY=$${BINARY:-cachet} --build-arg VERSION=$$(git describe --tags --always --dirty) \
+	  -t cachet/$${BINARY:-cachet}:dev .
+
 .PHONY: test-all
 test-all: test-unit test-integration test-consistency test-e2e ## Everything, in dependency order
 

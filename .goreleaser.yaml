@@ -1,0 +1,153 @@
+# Signed, reproducible release artefacts.
+#
+# The rule this file exists to serve: a stranger must be able to install cachetctl, run the demo and
+# benchmark their own database WITHOUT cloning this repository. Everything below is in service of
+# that, and of being able to prove afterwards that what they downloaded is what we built.
+version: 2
+
+project_name: cachet
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+
+builds:
+  # cachetctl first: it is the binary a stranger runs before deciding whether to trust anything
+  # else, so it is the one that must always be installable.
+  - id: cachetctl
+    main: ./cmd/cachetctl
+    binary: cachetctl
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+  - id: cachet
+    main: ./cmd/cachet
+    binary: cachet
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+  - id: flux
+    main: ./cmd/flux
+    binary: flux
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+  - id: sextant
+    main: ./cmd/sextant
+    binary: sextant
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    ids: [cachetctl, cachet, flux, sextant]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+      - CONSISTENCY.md
+      - FAULTS.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Keyless signing against the workflow's OIDC identity. No long-lived key to leak, and the
+# transparency log is what lets somebody verify a download against the exact workflow run that
+# produced it rather than against a promise on a web page.
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+sboms:
+  - artifacts: archive
+
+homebrew_casks:
+  - name: cachetctl
+    ids: [default]
+    repository:
+      owner: Abhishek-Mallick
+      name: homebrew-cachet
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/Abhishek-Mallick/cachet
+    description: Operator CLI for Cachet — health, routing, key inspection, benchmarks
+    # Only cachetctl is installed. The engine belongs in a container next to a service, not in
+    # somebody's /usr/local/bin.
+    # The artefact list is derived from the archive, so nothing is declared here: naming it twice
+    # is one more thing to drift.
+    # Downloaded binaries are quarantined by Gatekeeper; without this the first run fails with a
+    # dialog rather than an error, which is a bad first thirty seconds.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/cachetctl"]
+          end
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat'
+      order: 0
+    - title: Fixes
+      regexp: '^fix'
+      order: 1
+    - title: Correctness and proof
+      regexp: '^(chaos|test|consistency)'
+      order: 2
+    - title: Performance
+      regexp: '^(perf|bench)'
+      order: 3
+  filters:
+    exclude:
+      - '^docs'
+      - '^web'
+      - '\[skip ci\]'
+
+release:
+  draft: true
+  prerelease: auto
+  header: |
+    ## Cachet {{ .Version }}
+
+    Pre-1.0. The consistency model is the contract; see CONSISTENCY.md.
+  footer: |
+    ### Verifying what you downloaded
+
+    ```bash
+    cosign verify-blob checksums.txt \
+      --certificate checksums.txt.pem \
+      --signature checksums.txt.sig \
+      --certificate-identity-regexp 'https://github.com/Abhishek-Mallick/cachet/.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+    sha256sum -c checksums.txt --ignore-missing
+    ```

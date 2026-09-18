@@ -1,0 +1,116 @@
+{{- if eq .Values.topology "service" -}}
+{{/*
+The service tier. Deployed only when you ask for it: the sidecar is the benchmarked default, and
+this shape adds a network hop to every read in exchange for fewer processes to operate.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cachet.fullname" . }}
+  labels:
+    {{- include "cachet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+spec:
+  replicas: {{ .Values.engine.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cachet.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: engine
+  template:
+    metadata:
+      labels:
+        {{- include "cachet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: engine
+      annotations:
+        # Roll the pods when the config changes. Without this a configuration edit appears to apply
+        # and does not, which is the worst kind of change: silent.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cachet.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: cachet
+          image: {{ include "cachet.image" (dict "root" . "binary" "cachet") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --listen=tcp://0.0.0.0:{{ .Values.engine.grpcPort }}
+            - --metrics-addr=:{{ .Values.engine.metricsPort }}
+            - --config=/etc/cachet/config.yaml
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.engine.grpcPort }}
+            - name: metrics
+              containerPort: {{ .Values.engine.metricsPort }}
+          env:
+            {{- if .Values.existingSecret }}
+            - name: CACHET_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.username }}
+            - name: CACHET_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret }}
+                  key: {{ .Values.secretKeys.password }}
+            {{- end }}
+          volumeMounts:
+            - name: cachet-config
+              mountPath: /etc/cachet
+              readOnly: true
+          # The engine drains on shutdown, so the probes exist to keep traffic off a pod that is
+          # still starting rather than to restart one that is merely busy.
+          readinessProbe:
+            tcpSocket: { port: grpc }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: grpc }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.engine.resources | nindent 12 }}
+      volumes:
+        - name: cachet-config
+          configMap:
+            name: {{ include "cachet.fullname" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cachet.fullname" . }}
+  labels:
+    {{- include "cachet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: {{ .Values.engine.grpcPort }}
+      targetPort: grpc
+    - name: metrics
+      port: {{ .Values.engine.metricsPort }}
+      targetPort: metrics
+  selector:
+    {{- include "cachet.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+{{- end -}}

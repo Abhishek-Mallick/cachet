@@ -1,0 +1,109 @@
+# Cachet's default deployment shape is a SIDECAR over a Unix socket: it is what the benchmarks
+# measure and it is roughly 15% better at p99 than the service tier.
+#
+# A chart cannot deploy a sidecar, though — a sidecar belongs to somebody else's pod. So this chart
+# deploys the pieces that are genuinely cluster-scoped (the CDC tailer, and optionally the verifier)
+# and gives you two ways to get the engine itself:
+#
+#   topology: sidecar   renders nothing for the engine, and you include the `cachet.sidecar`
+#                       template in your own pod spec. This is the recommended shape.
+#   topology: service   deploys the engine as a shared tier behind a Service. Fewer moving parts
+#                       to operate, one extra network hop on every read.
+topology: sidecar
+
+image:
+  registry: ghcr.io
+  repository: abhishek-mallick/cachet
+  # Pin a digest in anything you actually deploy. A tag is a promise about a name; a digest is a
+  # statement about bytes, and images are signed by digest.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+engine:
+  replicaCount: 2
+  # The Unix socket path the sidecar listens on. Ignored when topology is `service`.
+  socketPath: /var/run/cachet/cachet.sock
+  grpcPort: 8080
+  metricsPort: 9090
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    # The sidecar RSS budget is 50-100Mi. A regression against this is treated as a build failure,
+    # because a sidecar that is expensive to run is a sidecar nobody deploys.
+    limits: { cpu: "1", memory: 128Mi }
+
+# The CDC tailer. One per deployment, not one per service: two tailers sharing a replication id
+# fight over the connection.
+flux:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  # Checkpoints must survive a restart or the tailer resumes from the current binlog position and
+  # silently skips every write made while it was down.
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+
+# The verifier. Optional, and the thing to run first: in shadow mode it reports what your
+# consistency WOULD have been, against traffic Cachet does not serve.
+sextant:
+  enabled: false
+  shadow: true
+  replicaCount: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+# Shard DSNs. Credentials belong in a Secret you create; reference it here rather than putting a
+# password in values.
+shards: []
+#  - id: shard0
+#    host: mysql-0.mysql
+#    port: 3306
+#    database: app
+
+cache:
+  addresses: []
+  #  - valkey-0.valkey:6379
+  ttl: 5m
+
+# The DSN password is read from this Secret. Never inlined into the ConfigMap: a ConfigMap is
+# readable by anything that can list them, and ends up in `helm get values` output.
+existingSecret: ""
+secretKeys:
+  username: username
+  password: password
+
+consistency:
+  # Unspecified is treated as SESSION, so a caller that forgets to choose gets read-own-writes
+  # rather than silently getting the weakest option.
+  defaultLevel: SESSION
+  maxClockSkew: 250ms
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceMonitor:
+  enabled: false
+  interval: 30s

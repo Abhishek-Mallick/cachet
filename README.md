@@ -147,6 +147,35 @@ the benchmarks more interesting.
 - **Not a write cache.** Writes go to the database. Always.
 - **Not a database.** It never becomes the source of truth.
 
+## Install
+
+Nothing below requires cloning this repository.
+
+```bash
+# The operator CLI — health, routing, key inspection, and `bench quick` against your own database
+brew install Abhishek-Mallick/cachet/cachetctl
+
+# Or a signed binary, verified before you run it
+cosign verify-blob checksums.txt \
+  --certificate checksums.txt.pem --signature checksums.txt.sig \
+  --certificate-identity-regexp 'https://github.com/Abhishek-Mallick/cachet/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+```bash
+# The engine, as a sidecar. Signed by digest, because a tag can be moved after signing.
+docker pull ghcr.io/abhishek-mallick/cachet/cachet:v0.1.0
+helm install cachet oci://ghcr.io/abhishek-mallick/charts/cachet --version 0.1.0
+```
+
+```go
+import "github.com/Abhishek-Mallick/cachet/pkg/cachet"   // go get github.com/Abhishek-Mallick/cachet
+```
+
+<sub>Pre-1.0 and not yet tagged: the commands above describe the release pipeline in
+`.github/workflows/release.yml`, which publishes on the first tag. Until then, build from source
+with `make build`.</sub>
+
 ## Quickstart
 
 ```bash
@@ -296,6 +325,9 @@ it rides on, while CDC adds a variable delivery delay:
 | [`CONSISTENCY.md`](./CONSISTENCY.md) | The normative consistency model — every level's guarantee, non-guarantee, and the test that catches its violation |
 | [`FAULTS.md`](./FAULTS.md) | Injected faults, and the command or metric that explains each one |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Engineering standards and the CI gate |
+| [`CHANGELOG.md`](./CHANGELOG.md) | What changed, and the rule that a consistency change is a major version |
+| [`SECURITY.md`](./SECURITY.md) | Reporting, the threat model, and how to verify a release |
+| [`deploy/helm/cachet/`](./deploy/helm/cachet/) | The Helm chart, and why it will not deploy your sidecar for you |
 
 | [`docs/cachet-benchmarking.md`](./docs/cachet-benchmarking.md) | How every published number is produced, and the traps that make benchmarks fiction |
 | [`docs/adr/`](./docs/adr/) | Architecture decisions: Go · Valkey vs Redis · HLC versioning · sidecar-as-default |
