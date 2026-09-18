@@ -111,6 +111,16 @@ type CacheOptions struct {
 	// transfer.
 	Shards []config.Shard
 
+	// ClockSkew offsets a shard's clock from this process's wall time.
+	//
+	// HLC versions are derived from the shard's clock, so this is where real clock skew between
+	// database hosts enters the system. The chaos suite uses it to assert that ordering survives a
+	// skew larger than the engine's configured tolerance. Nil means no skew anywhere.
+	//
+	// It does NOT move the database's own timestamps: this skews the clock Cachet reads, which is
+	// the component the HLC rules actually depend on.
+	ClockSkew func(shard string) time.Duration
+
 	// CacheAddr overrides the cache address. Empty takes DefaultCacheAddr. Same rationale as Shards.
 	CacheAddr string
 
@@ -181,7 +191,12 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 	ids := make([]storage.ShardID, 0, len(shardCfg))
 	for _, sc := range shardCfg {
 		id := storage.ShardID(sc.ID)
-		sh, err := storage.OpenShard(ctx, id, sc.DSN, storage.NewClock(time.Now))
+		clock := storage.NewClock(time.Now)
+		if opts.ClockSkew != nil {
+			skew := opts.ClockSkew(sc.ID)
+			clock = storage.NewClock(func() time.Time { return time.Now().Add(skew) })
+		}
+		sh, err := storage.OpenShard(ctx, id, sc.DSN, clock)
 		if err != nil {
 			t.Fatalf("open shard %s: %v", id, err)
 		}

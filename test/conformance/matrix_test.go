@@ -16,8 +16,11 @@ package conformance_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,13 +255,45 @@ func newEnv(t *testing.T, cfg config) *env {
 		cluster: cluster,
 		client:  cluster.Client(t, cluster.Addrs[0]),
 		cfg:     cfg,
-		// A distinct id range per run, so a rerun never inherits a previous run's rows. Sharing
-		// them would make a test's outcome depend on how many times it had been run before.
-		next: uint64(time.Now().UnixNano() % 1_000_000 * 1000),
+		next:    nextIDRange(),
 	}
 }
 
-// key returns an id no other cell in this run will touch.
+// idsPerEnv is the slice of the id space each env owns. Generous: a cell uses tens of ids, and the
+// cost of a wide range is nothing while the cost of two envs meeting is a test that fails for a
+// reason nobody will find.
+const idsPerEnv = 10_000
+
+var (
+	// runBase keeps one `go test` process clear of rows left by earlier ones, which are never
+	// cleaned up; envSeq keeps envs within a process clear of each other.
+	runBase = randomRunBase()
+	envSeq  atomic.Uint64
+)
+
+// nextIDRange hands out a disjoint id range per env.
+//
+// The previous scheme derived the base from the wall clock modulo one millisecond, which REPEATS.
+// Two envs created a whole number of milliseconds apart received the identical range, and a test
+// then asserted the absence of a row another test had just written. Measured against real
+// timestamps taken a millisecond apart — the rate these tests actually run at — that produced 61
+// exact collisions in 400 envs. Isolation cannot be a function of timing; it has to be a function
+// of allocation.
+func nextIDRange() uint64 {
+	return (runBase + envSeq.Add(1)*idsPerEnv) % 900_000_000
+}
+
+func randomRunBase() uint64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Only reachable if the system entropy source is broken. The clock is a worse base, but a
+		// worse base beats refusing to run the suite.
+		return uint64(time.Now().UnixNano()) % 90_000 * idsPerEnv
+	}
+	return binary.LittleEndian.Uint64(b[:]) % 90_000 * idsPerEnv
+}
+
+// key returns an id no other cell in this run, and no other env in this process, will touch.
 func (e *env) key() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -11,14 +11,19 @@
 > Every entry also carries the evidence that its injection actually fired. A toxic that
 > silently failed to apply produces a serene green test asserting nothing.
 
-**Coverage: 4 of 9.**
+**Coverage: 9 of 9.**
 
 | # | Fault | Explained by |
 |---|---|---|
 | 1 | ✅ Cache node unreachable mid-traffic | `cachetctl health` reports the node as failing: `127.0.0.1:26379` 2/5 failing (40%), shedding 0% |
-| 2 | ✅ Cache node slow, not dead | `cachetctl health` prints per-node breaker state; during the fault: `127.0.0.1:26379` 22/23 failing (96%), shedding 91% |
+| 2 | ✅ Cache node slow, not dead | `cachetctl health` prints per-node breaker state; during the fault: `127.0.0.1:26379` 24/25 failing (96%), shedding 91% |
 | 3 | ✅ Cache partitioned across a write — neither invalidation path can deliver | `cachetctl checkpoints` — a tailer that could not deliver freezes its position rather than advancing past the loss, so a checkpoint that has stopped moving while the binlog has not is the visible symptom. |
+| 4 | ✅ Cache evicts under memory pressure | `cachetctl inspect entities:8400004` shows whether the entry is present and what fill version it holds; an evicted key reports as absent, which is the same thing the engine treats as a miss. |
 | 5 | ✅ Shard unreachable | `cachetctl locate entities:8500000` names the shard, and `cachetctl health` shows which shard is unreachable. |
+| 6 | ✅ Binlog tailer killed mid-stream | `cachetctl checkpoints` prints each tailer's position; one that resumes where it stopped is the evidence, and one frozen behind the binlog is the symptom of a delivery it could not make. |
+| 7 | ✅ Tailer rewound to an old checkpoint | `cachetctl inspect entities:8700001` shows the entry's fill version against the row version; a tombstone whose version is older is rejected by the compare-and-set rather than applied. |
+| 8 | ✅ Clock skew between shards | `cachetctl inspect entities:8300008` prints the row version and the entry's fill version; the session token is a per-shard map, so a version from the fast shard is never compared against one from a slow shard. Note what is NOT claimed: BOUNDED(t) sums `max_clock_skew` into its propagation bound, so skew beyond the configured value is outside the guarantee by construction, not absorbed by it. |
+| 9 | ✅ Lease holder dies during a slow fill | `cachet_lease_outcomes_total` separates granted, waited and wait_exhausted: rising `wait_exhausted` with no matching fill is the signature of a holder that died, and `cachetctl inspect entities:8800009` shows the key still unfilled while readers are served from the database. |
 
 ## 1. Cache node unreachable mid-traffic
 
@@ -38,11 +43,11 @@
 
 **Claim.** The breaker sheds proportionally rather than latching open, and reads stay correct throughout.
 
-**The injection fired.** `cachet_cache_operations_total{op="get",result="error"}` = 11 over 40 reads
+**The injection fired.** `cachet_cache_operations_total{op="get",result="error"}` = 13 over 40 reads
 
 **Observed.** All 40 reads returned the correct payload; shed probability stayed strictly between 0 and 1.
 
-**Explained by.** `cachetctl health` prints per-node breaker state; during the fault: `127.0.0.1:26379` 22/23 failing (96%), shedding 91%
+**Explained by.** `cachetctl health` prints per-node breaker state; during the fault: `127.0.0.1:26379` 24/25 failing (96%), shedding 91%
 
 ## 3. Cache partitioned across a write — neither invalidation path can deliver
 
@@ -56,6 +61,18 @@
 
 **Explained by.** `cachetctl checkpoints` — a tailer that could not deliver freezes its position rather than advancing past the loss, so a checkpoint that has stopped moving while the binlog has not is the visible symptom.
 
+## 4. Cache evicts under memory pressure
+
+**Injection.** `CONFIG SET maxmemory-policy allkeys-lru` and maxmemory clamped to 256KB above current usage, then traffic pushed through until keys are evicted
+
+**Claim.** Eviction is indistinguishable from a miss: it costs a database read and never an answer. Read-own-writes holds across it.
+
+**The injection fired.** `evicted_keys` rose by 323 during the clamp
+
+**Observed.** The read returned the correct value after eviction, and a write-then-SESSION-read still returned the caller's own write.
+
+**Explained by.** `cachetctl inspect entities:8400004` shows whether the entry is present and what fill version it holds; an evicted key reports as absent, which is the same thing the engine treats as a miss.
+
 ## 5. Shard unreachable
 
 **Injection.** Toxiproxy: `POST /proxies/shard1 {"enabled": false}`
@@ -68,13 +85,54 @@
 
 **Explained by.** `cachetctl locate entities:8500000` names the shard, and `cachetctl health` shows which shard is unreachable.
 
+## 6. Binlog tailer killed mid-stream
+
+**Injection.** The tailer's context is cancelled while writes continue, then a new tailer is started from the same checkpoint file. Synchronous invalidation is off, so the tailer is the only path that can invalidate.
+
+**Claim.** A restart resumes from the checkpoint, so writes made while the tailer was down are invalidated rather than skipped.
+
+**The injection fired.** Stopped at checkpoint `binlog.000003:18659567`; 4 of 4 keys were verifiably serving stale reads while nothing was tailing
+
+**Observed.** After restart all 4 converged to the post-outage value, and the checkpoint advanced to `binlog.000003:18661255`.
+
+**Explained by.** `cachetctl checkpoints` prints each tailer's position; one that resumes where it stopped is the evidence, and one frozen behind the binlog is the symptom of a delivery it could not make.
+
+## 7. Tailer rewound to an old checkpoint
+
+**Injection.** The checkpoint file is rewritten to an earlier position (`binlog.000003:18661677`) and the tailer restarted
+
+**Claim.** Replay is idempotent: an invalidation carrying an older version cannot act on an entry filled from a newer one.
+
+**The injection fired.** The rewound tailer re-processed 1 event(s) it had already applied
+
+**Observed.** Reads returned the current value throughout the replay, never the pre-rewind one.
+
+**Explained by.** `cachetctl inspect entities:8700001` shows the entry's fill version against the row version; a tombstone whose version is older is rejected by the compare-and-set rather than applied.
+
+## 8. Clock skew between shards
+
+**Injection.** shard0's clock is advanced 3s — an order of magnitude beyond the engine's configured tolerance — while the other shards run normally
+
+**Claim.** Read-own-writes is carried by the per-shard session watermark, not by clocks agreeing. Versions stay monotonic within the skewed shard and the skew does not leak to the others.
+
+**The injection fired.** Versions written to shard0 carry a physical time 2.993s ahead of those written to an unskewed shard
+
+**Observed.** SESSION reads returned the caller's own writes on both the skewed and the normal shard, and six successive writes to the skewed shard produced strictly increasing versions.
+
+**Explained by.** `cachetctl inspect entities:8300008` prints the row version and the entry's fill version; the session token is a per-shard map, so a version from the fast shard is never compared against one from a slow shard. Note what is NOT claimed: BOUNDED(t) sums `max_clock_skew` into its propagation bound, so skew beyond the configured value is outside the guarantee by construction, not absorbed by it.
+
+## 9. Lease holder dies during a slow fill
+
+**Injection.** A caller takes the fill lease via GetOrLease and never fills, with a 60s lease TTL so expiry cannot rescue the readers
+
+**Claim.** The wait is bounded and degrades to a direct read. Callers get slower; they do not get stuck, and none get an error.
+
+**The injection fired.** `cachet_lease_outcomes_total{outcome="waited"}` rose by 4 and `{outcome="wait_exhausted"}` by 1 — the readers met the abandoned lease and their wait ran out
+
+**Observed.** All 20 reads returned the correct value in 137ms, against a lease TTL of 60s.
+
+**Explained by.** `cachet_lease_outcomes_total` separates granted, waited and wait_exhausted: rising `wait_exhausted` with no matching fill is the signature of a holder that died, and `cachetctl inspect entities:8800009` shows the key still unfilled while readers are served from the database.
+
 ## Not yet covered
 
-These are planned and not yet recorded. They are listed so this document cannot be
-mistaken for a complete one.
-
-- **4.** Valkey evicts under memory pressure
-- **6.** Binlog tailer killed mid-stream
-- **7.** Tailer rewound to an old checkpoint
-- **8.** Clock skew injected between nodes
-- **9.** Lease holder dies during a slow fill
+Nothing. Every fault in the catalogue has an entry above.
