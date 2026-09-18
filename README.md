@@ -69,13 +69,22 @@ Precise invalidation is the foundation. Everything below is what it makes possib
 
 | | Cachet | ReadySet | PolyScale | DIY Redis |
 |---|---|---|---|---|
-| Invalidation | CDC + **exact write-path** | Streaming dataflow | Heuristic | Hand-rolled |
+| Invalidation | CDC + **exact write-path** | Streaming dataflow · TTL | Heuristic | Hand-rolled |
 | Consistency | **Read-own-writes, tiered** | Eventual | Probabilistic | Undefined |
 | **Measured correctness** | ✅ **Live SLO** | ❌ | ❌ | ❌ |
 | Stampede protection | ✅ **Leases** | Partial | ❌ | ❌ |
-| Self-tuning admission | ✅ **Per-key r:w** | ❌ manual | Heuristic | ❌ |
+| Self-tuning admission | Per-key read:write | Auto, per query | Heuristic | ❌ |
+| Query shapes | Point lookups only | **Joins, aggregates** | Any | Any |
+| Databases | MySQL/MyRocks | **MySQL + Postgres** | Many | Any |
+| Integration | A Go SDK | **Wire-compatible proxy** | Proxy | Your own code |
 
-**Every cache on that list asks you to trust it. Cachet is the only one that proves it.**
+The bottom three rows are where the alternatives are ahead, and they are in the table for that
+reason. ReadySet in particular is better at more things than Cachet is: it speaks your wire
+protocol, it does Postgres, and it caches joins.
+
+**What none of them can tell you is how consistent your reads actually were** — the information
+needed to answer that does not exist in a proxy. That one gap is the whole reason Cachet exists. If
+you do not need that answer, one of the others is probably the right choice.
 
 ### Consistency as a per-request parameter
 

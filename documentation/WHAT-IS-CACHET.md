@@ -76,13 +76,22 @@ concurrent clients disagree. See [`CONSISTENCY.md`](../CONSISTENCY.md) for the n
 
 | | Cachet | ReadySet | PolyScale | DIY Redis |
 |---|---|---|---|---|
-| Invalidation | CDC + **exact write-path** | Streaming dataflow | Heuristic | Hand-rolled |
+| Invalidation | CDC + **exact write-path** | Streaming dataflow · TTL | Heuristic | Hand-rolled |
 | Consistency | **Read-own-writes, tiered** | Eventual | Probabilistic | Undefined |
 | **Measured correctness** | ✅ **Live SLO** | ❌ | ❌ | ❌ |
 | Stampede protection | ✅ **Leases** | Partial | ❌ | ❌ |
-| Self-tuning admission | ✅ **Per-key r:w** | ❌ manual | Heuristic | ❌ |
+| Self-tuning admission | Per-key read:write | Auto, per query | Heuristic | ❌ |
+| Query shapes | Point lookups only | **Joins, aggregates** | Any | Any |
+| Databases | MySQL/MyRocks | **MySQL + Postgres** | Many | Any |
+| Integration | A Go SDK | **Wire-compatible proxy** | Proxy | Your own code |
 
-**Every cache on that list asks you to trust it. Cachet is the only one designed to prove it.**
+The bottom three rows are where the alternatives are ahead, and they are here for that reason.
+ReadySet is better at more things than Cachet is: it speaks your wire protocol, it does Postgres,
+and it caches joins.
+
+**What none of them can tell you is how consistent your reads actually were** — the information
+needed to answer that does not exist in a proxy, which sees a SQL statement and never its
+consequences. That one gap is the whole reason Cachet exists.
 
 Four things follow from sitting inside the data layer:
 
