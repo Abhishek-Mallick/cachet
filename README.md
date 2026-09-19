@@ -212,6 +212,18 @@ boundary. `make demo` brings the same stack up with Prometheus and a provisioned
 
 Full walkthrough: **[Quickstart →](./documentation/USING-CACHET.md)**
 
+### See the problem first
+
+```bash
+./bin/cachet -config examples/staleness-demo/cachet.yaml &
+go run ./examples/staleness-demo
+```
+
+Three caches against the same MySQL and the same Valkey — a TTL cache, an invalidate-on-every-write
+cache, and Cachet — where the only thing that changes is how each decides an entry is wrong. The
+middle one is the interesting one: it is what most teams run, and it is still stale after a
+conditional write. [**examples/staleness-demo →**](./examples/staleness-demo/)
+
 ## Features
 
 | | |

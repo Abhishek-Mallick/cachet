@@ -61,6 +61,11 @@ linters:
       # cmd/ mains legitimately print usage to stdout.
       - path: ^cmd/
         linters: [forbidigo]
+      # examples/ are terminal presentations. Formatted human output IS the program, and structured
+      # logging would be the wrong tool rather than a style difference — slog on a demo screen is
+      # noise. Only the print and fatal rules are relaxed; everything else still applies.
+      - path: ^examples/
+        linters: [forbidigo]
 
 formatters:
   enable:

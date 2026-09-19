@@ -114,6 +114,10 @@ test-chaos: ## The injected faults (needs env-chaos-up)
 env-chaos-up: ## Bring the stack up with Toxiproxy in front of every dependency
 	$(COMPOSE) $(F_BASE) $(F_CHAOS) up -d --wait
 
+.PHONY: demo-staleness
+demo-staleness: ## The three-act staleness demo (needs env-up and a running engine)
+	$(GO) run ./examples/staleness-demo
+
 .PHONY: faults
 faults: ## Regenerate FAULTS.md from what the chaos suite recorded
 	$(GO) run ./cmd/benchctl faults

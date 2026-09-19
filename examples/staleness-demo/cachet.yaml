@@ -1,0 +1,31 @@
+# Engine config for the staleness demo.
+#
+# One shard, not three. The demo is about invalidation, and sharding would add a moving part that
+# has nothing to do with the point being made.
+
+listen:
+  - "tcp://127.0.0.1:7070"
+
+shards:
+  - id: shard0
+    dsn: "root:cachet@tcp(127.0.0.1:3316)/cachet?parseTime=true&interpolateParams=true"
+
+cache:
+  addresses:
+    - "127.0.0.1:6379"
+
+# Unspecified reads get SESSION: read-own-writes, which is what an application actually wants.
+default_level: SESSION
+
+consistency:
+  # Deliberately long, and the whole point of Act 1. A TTL is not a correctness mechanism: it does
+  # not make you correct, it shortens the window in which you are wrong. Cachet does not need it to
+  # be short, because the TTL is not what keeps entries fresh — invalidation is.
+  entry_ttl: 1h
+
+  max_clock_skew: 250ms
+  # Invalidate after commit, before the write is acknowledged. This is Act 3.
+  synchronous_invalidation: true
+
+observability:
+  metrics_listen: "127.0.0.1:9095"

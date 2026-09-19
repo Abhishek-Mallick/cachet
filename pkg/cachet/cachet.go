@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,20 @@ func WithoutHandshake() Option {
 	return func(o *options) { o.skipHandshake = true }
 }
 
+// normalizeTarget accepts the address syntax the engine's own configuration uses.
+//
+// A listener in cachet.yaml is written "tcp://host:port" or "unix:///path". gRPC understands the
+// second and not the first, so pasting a TCP listener address into Dial used to fail deep inside
+// the resolver with "too many colons in address" — an error that names nothing the caller did.
+// Stripping the scheme here costs one line and removes a stumbling block from the first thirty
+// seconds of using this SDK.
+//
+// Everything else is passed through untouched, including unix:// and explicit gRPC schemes like
+// dns:///, so this can only widen what Dial accepts.
+func normalizeTarget(target string) string {
+	return strings.TrimPrefix(target, "tcp://")
+}
+
 // Dial connects to a Cachet engine and verifies it can serve this client.
 //
 // The handshake happens here rather than lazily, so an incompatible server is a startup failure. A
@@ -98,7 +113,7 @@ func Dial(ctx context.Context, target string, opts ...Option) (*Client, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}, o.dialOptions...)
 
-	conn, err := grpc.NewClient(target, dialOpts...)
+	conn, err := grpc.NewClient(normalizeTarget(target), dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("cachet: dial %s: %w", target, err)
 	}
