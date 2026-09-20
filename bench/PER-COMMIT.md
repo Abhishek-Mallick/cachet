@@ -21,6 +21,7 @@
 
 | Commit | Date | ControllerConcurrent<br/><sub>ns/op · allocs/op</sub> | RingLookup<br/><sub>ns/op · allocs/op</sub> | SketchCounts<br/><sub>ns/op · allocs/op</sub> | TokenAdvance<br/><sub>ns/op · allocs/op</sub> | TokenProto<br/><sub>ns/op · allocs/op</sub> | Trend<br/><sub>ns/op vs previous</sub> |
 |---|---|---|---|---|---|---|---|
+| `0b818ba` | 2026-09-20 | 1.23µs · 3 | 25.9ns · 0 | 167.4ns · 0 | 36.5ns · 0 | 444.2ns · 2 | ▬ -0% |
 | `83fc271` | 2026-09-20 | 1.24µs · 3 | 25.8ns · 0 | 175.5ns · 0 | 36.4ns · 0 | 431.2ns · 2 | ▬ +1% |
 | `ffc2660` | 2026-09-19 | 1.24µs · 3 | 25.8ns · 0 | 168.0ns · 0 | 36.6ns · 0 | 421.9ns · 2 | ▲▲ +35% |
 | `16bbd2d` | 2026-09-18 | 847.7ns · 3 | 18.6ns · 0 | 135.7ns · 0 | 29.6ns · 0 | 290.5ns · 2 | ▽▽ -25% |
@@ -34,9 +35,9 @@ so the shapes show movement and cannot be compared BETWEEN benchmarks. Read them
 direction; read the table for values.
 
 ```
-ControllerConcurrent  ▇▁▁█▇  1.20µs → 1.24µs  (+3%)
-RingLookup            ▂█▁▂▂  24.0ns → 25.8ns  (+7%)
-SketchCounts          █▃▁▆▇  178.3ns → 175.5ns  (-2%)
-TokenAdvance          ▆█▁▅▅  38.3ns → 36.4ns  (-5%)
-TokenProto            ▅▁▁▇█  374.2ns → 431.2ns  (+15%)
+ControllerConcurrent  ▇▁▁██▇  1.20µs → 1.23µs  (+2%)
+RingLookup            ▂█▁▂▂▂  24.0ns → 25.9ns  (+8%)
+SketchCounts          █▃▁▆▇▆  178.3ns → 167.4ns  (-6%)
+TokenAdvance          ▆█▁▅▅▅  38.3ns → 36.5ns  (-5%)
+TokenProto            ▄▁▁▆▇█  374.2ns → 444.2ns  (+19%)
 ```
