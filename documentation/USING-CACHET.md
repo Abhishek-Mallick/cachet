@@ -561,6 +561,6 @@ See [ADR 0004 — sidecar as the default topology](../docs/adr/0004-sidecar-defa
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](../CONTRIBUTING.md). The short version: `make lint` and `make test-unit`
+See [`CONTRIBUTING.md`](../.github/CONTRIBUTING.md). The short version: `make lint` and `make test-unit`
 must be green, tests come before the code they cover, and any decision that would otherwise be
 re-argued gets an ADR in [`docs/adr/`](../docs/adr/).

@@ -194,3 +194,102 @@ function barColor(index: number, muted?: boolean): string {
     ? 'color-mix(in oklch, var(--color-fd-muted-foreground) 55%, transparent)'
     : 'var(--color-fd-primary)';
 }
+
+/**
+ * Bars on a logarithmic scale.
+ *
+ * For comparisons spanning orders of magnitude, where a linear scale makes the smaller value
+ * invisible and therefore makes the chart useless. 10.07s against 34.98ms is 288x: drawn linearly
+ * the second bar is a third of a pixel, which tells the reader nothing except that one bar is long.
+ *
+ * A log scale flatters small differences, so it is used only where the difference is the headline
+ * and the axis is labelled as logarithmic.
+ */
+export function LogBars({
+  data,
+  unit = '',
+  format,
+  highlight,
+}: {
+  data: { label: string; value: number }[];
+  unit?: string;
+  format?: (n: number) => string;
+  highlight?: string;
+}) {
+  const fmt = format ?? ((n: number) => `${n}${unit}`);
+  const values = data.map((d) => d.value).filter((v) => v > 0);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  // One decade of headroom either side, so neither end sits flush against the axis.
+  const lo = Math.log10(min) - 0.35;
+  const hi = Math.log10(max) + 0.1;
+
+  return (
+    <figure className="my-6 space-y-2 not-prose">
+      {data.map((d) => {
+        const pct = d.value > 0 ? ((Math.log10(d.value) - lo) / (hi - lo)) * 100 : 0;
+        const isHighlight = d.label === highlight;
+        return (
+          <div key={d.label} className="grid grid-cols-[11rem_1fr] items-center gap-3">
+            <div className="truncate text-right text-xs text-fd-muted-foreground">{d.label}</div>
+            <div className="flex items-center gap-2">
+              <div className="h-5 flex-1 overflow-hidden rounded-sm bg-fd-secondary/60">
+                <div
+                  className="h-full rounded-sm"
+                  style={{
+                    width: `${Math.max(pct, 1)}%`,
+                    background: isHighlight ? 'var(--color-fd-primary)' : barColor(1, true),
+                  }}
+                  role="img"
+                  aria-label={`${d.label}: ${fmt(d.value)}`}
+                />
+              </div>
+              <div className="w-28 shrink-0 font-mono text-xs tabular-nums">{fmt(d.value)}</div>
+            </div>
+          </div>
+        );
+      })}
+      <figcaption className="pl-[11.75rem] text-xs text-fd-muted-foreground">
+        Logarithmic scale — the values differ by orders of magnitude.
+      </figcaption>
+    </figure>
+  );
+}
+
+/**
+ * A before/after pair, for a change large enough that a chart would be theatre.
+ *
+ * Two numbers and the thing that changed. Used where drawing 0 and 5 as bars would dress up a
+ * result that is clearer stated.
+ */
+export function BeforeAfter({
+  items,
+}: {
+  items: { label: string; before: string; after: string; note?: string }[];
+}) {
+  return (
+    <figure className="my-6 grid gap-3 not-prose sm:grid-cols-2">
+      {items.map((it) => (
+        <div key={it.label} className="rounded-xl border border-fd-border p-4">
+          <div className="text-xs font-medium tracking-wide text-fd-muted-foreground uppercase">
+            {it.label}
+          </div>
+          <div className="mt-3 flex items-baseline gap-3">
+            <span className="font-mono text-lg text-fd-muted-foreground line-through decoration-1">
+              {it.before}
+            </span>
+            <span aria-hidden className="text-fd-muted-foreground">
+              →
+            </span>
+            <span className="font-mono text-2xl font-semibold" style={{ color: 'var(--color-fd-primary)' }}>
+              {it.after}
+            </span>
+          </div>
+          {it.note ? (
+            <p className="mt-2 text-sm text-fd-muted-foreground">{it.note}</p>
+          ) : null}
+        </div>
+      ))}
+    </figure>
+  );
+}

@@ -37,18 +37,33 @@ one: it pays 32 QPS for the difference below.
 
 ## What that correctness costs, and buys
 
-<GroupedBars
-  categories={['TTL only', '+ CDC']}
-  series={[
-    { label: 'Hit rate (%)', values: [93.9, 89.7], muted: true },
-    { label: 'p99 staleness (ms)', values: [10070, 34.98] },
+Two axes, two charts. Putting a hit rate and a staleness figure on one scale would draw the 93.9%
+bar at a third of a pixel beside 10,070 — a chart that is technically accurate and tells you nothing.
+
+**What it costs — 4.2 points of hit rate:**
+
+<Bars
+  data={[
+    { label: 'TTL only', value: 93.9 },
+    { label: '+ CDC invalidation', value: 89.7 },
   ]}
-  format={(n) => (n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${n}`)}
+  format={(n) => `${n}%`}
 />
 
-A TTL cache reaches the better hit rate — 93.9% against 89.7% — and serves data up to **10.07
-seconds stale**. Exact invalidation gives back 4.2 points of hit rate and brings p99 staleness to
-**34.98 ms**: 288× better.
+**What it buys — 288× on p99 staleness:**
+
+<LogBars
+  data={[
+    { label: 'TTL only', value: 10070 },
+    { label: '+ CDC invalidation', value: 34.98 },
+  ]}
+  highlight="+ CDC invalidation"
+  format={(n) => (n >= 1000 ? `${(n / 1000).toFixed(2)} s` : `${n} ms`)}
+/>
+
+A TTL cache reaches the better hit rate and serves data up to **10.07 seconds stale**. Exact
+invalidation gives back 4.2 points and brings p99 staleness to **34.98 ms**. That is the trade, in
+both directions, and neither half is hidden.
 
 ## Both invalidation paths, measured separately
 
@@ -89,6 +104,38 @@ point lookup is already fast: the cache removes a round trip that was not the bo
 *load*, not wall time. A latency win should appear once the origin is under enough pressure to
 queue, which is what the stampede workload exists to create.
 
+## A defect only a hit-rate test could find
+
+Not every result is a benchmark of the system against an alternative. This one is the system against
+itself, and it is here because it is the most instructive number on the page.
+
+`SESSION` is the default consistency level. A long-lived client reading more than one key on a shard
+was getting a cache miss on **every read, for ever** — with no writes involved at all. Each read
+advanced that shard's watermark to its own fill version, so reading one key made every other key's
+entry look too old to serve.
+
+<BeforeAfter
+  items={[
+    {
+      label: 'SESSION · 5 keys · one client',
+      before: '0/5 hits',
+      after: '5/5 hits',
+      note: 'Every pass, with no writes. EVENTUAL was 5/5 throughout, which is what isolated it.',
+    },
+    {
+      label: 'Read-own-writes',
+      before: 'held',
+      after: 'held',
+      note: 'The fix advances the watermark by the row version observed, not the read clock.',
+    },
+  ]}
+/>
+
+**Nothing was ever served stale** — the engine was too conservative, not too permissive. Which is
+exactly why no correctness test could catch it: a guarantee implemented *more strongly* than it is
+documented cannot fail a test of the guarantee. It took a test that asserts a **hit rate**, and there
+now is one in the conformance matrix.
+
 ## Per-commit regression signal
 
 Separately from published figures, CI runs the microbenchmarks on every push that touches the
@@ -99,18 +146,25 @@ allocations column is the trustworthy one — allocation counts do not depend on
 is. It earns its place: an adaptive-admission defect that cost 630 ms of tail latency showed up
 there as a 4× regression.
 
-<Bars
-  data={[
-    { label: 'Sketch counts, before', value: 398 },
-    { label: 'Sketch counts, after', value: 91 },
-    { label: 'Controller, before', value: 955 },
-    { label: 'Controller, after', value: 402 },
+<BeforeAfter
+  items={[
+    {
+      label: 'Sketch counts',
+      before: '398 ns/op',
+      after: '91 ns/op',
+      note: 'Cell indices were recomputed once per bucket, inside the lock.',
+    },
+    {
+      label: 'Concurrent controller',
+      before: '955 ns/op',
+      after: '402 ns/op',
+      note: 'Hashing moved outside the mutex, which is where the convoy formed.',
+    },
   ]}
-  format={(n) => `${n} ns/op`}
 />
 
-That defect passed every correctness test. A lock convoy surfaces as a tail, not an average, which
-is why only benchmarking could have found it.
+That defect passed every correctness test. A lock convoy surfaces as a **tail**, not an average —
+p99 of 629 ms against a 34 ms control — which is why only benchmarking could have found it.
 
 ## Reproducing these
 

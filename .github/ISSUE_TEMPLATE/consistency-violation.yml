@@ -9,7 +9,7 @@ body:
         than a performance regression.
 
         If the violation is reachable by an untrusted caller, please report it privately instead:
-        see [SECURITY.md](../blob/main/SECURITY.md).
+        see [SECURITY.md](../SECURITY.md).
   - type: dropdown
     id: level
     attributes:
