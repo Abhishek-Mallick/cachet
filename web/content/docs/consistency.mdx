@@ -62,7 +62,7 @@ CDC adds a variable delivery delay; synchronous invalidation is bounded by the w
 ## How the guarantees are checked
 
 Every level's promise — **and every documented non-promise** — is executed as a cell of a conformance
-matrix across all four levels.
+matrix across all four levels, and that matrix is a CI gate.
 
 ```bash
 make test-consistency

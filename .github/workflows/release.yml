@@ -74,7 +74,7 @@ jobs:
     strategy:
       matrix:
         # cachetctl is included so the demo can run entirely from images, without a Go toolchain.
-        binary: [cachet, flux, sextant, cachetctl]
+        binary: [cachet, cachet-proxy, flux, sextant, cachetctl]
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3

@@ -1,0 +1,82 @@
+---
+title: The MySQL proxy
+description: Use Cachet from an application that will not take an SDK — an ordinary MySQL client, no code change.
+---
+
+```bash
+cachet-proxy -config cachet.yaml -listen :3307
+mysql -h 127.0.0.1 -P 3307 -u cachet -p
+```
+
+That is the whole integration. Point your existing MySQL client at the proxy instead of the
+database.
+
+## Why a proxy can work here at all
+
+The argument against proxies in [What Cachet is](/docs/what-is-cachet) is that a proxy sees a SQL
+statement and never its consequences — it cannot know which rows an `UPDATE … WHERE` touched.
+
+That is true of a proxy which intercepts **reads only**. This one carries the writes too, which puts
+it inside the statement rather than beside it. It resolves the row, invalidates exactly that row,
+and maintains the `version` column on the way through.
+
+<Callout type="info" title="The version column is not optional, and you do not have to care">
+  Cachet's invalidation is a versioned compare-and-set: a tombstone carrying a version no newer than
+  the cached entry is **rejected**. So a raw `UPDATE` that leaves `version` alone would produce an
+  invalidation that loses its compare-and-set — on the write path and in the binlog tailer alike —
+  and the stale entry would never clear.
+
+  The proxy rewrites single-row writes to bump it. Your statement does not mention `version`, and
+  the row's version still moves.
+</Callout>
+
+## What it caches, and what it refuses
+
+It claims nothing it cannot prove. Classifying a statement as *pass it through* is always safe; the
+cost is a cache miss. Classifying one as cacheable when it is not is a correctness bug.
+
+| Statement | What happens |
+|---|---|
+| `SELECT status, payload FROM entities WHERE id = 42` | Served from the cache |
+| `SELECT * FROM entities WHERE id = 42` | **Passed through.** A cache entry holds `id`, `tenant_id`, `status`, `payload` and `version` — not `updated_at`. It cannot answer `*` without inventing a value |
+| `UPDATE entities SET payload = 'x' WHERE id = 42` | Forwarded with a version bump, then that row invalidated |
+| `DELETE FROM entities WHERE id = 42` | Forwarded, then that row invalidated |
+| `UPDATE entities SET status = 1 WHERE tenant_id = 9` | **Refused** — see below |
+| Joins, aggregates, subqueries, `FOR UPDATE`, prepared statements | Passed through |
+| Anything inside a transaction | Passed through — a transaction may have written rows nobody else can see, and the cache is nobody else |
+
+### Why an unresolvable write is refused rather than forwarded
+
+```
+ERROR 1105 (HY000): cachet proxy: refusing a write to "entities" it cannot
+resolve to specific rows: UPDATE entities SET status = 1 WHERE tenant_id = 9
+```
+
+Forwarding it would let the write land with `version` unchanged, so every invalidation path would
+lose its compare-and-set and those entries would serve stale data until their TTL, with nothing
+reporting it. An error at the point of the mistake is cheaper than staleness discovered later by a
+customer.
+
+Three ways forward, in order of preference:
+
+1. **Rewrite it as single-row statements.** The proxy then invalidates each exactly.
+2. **Use the SDK for that path.** `UpdateWhere` resolves the affected rows inside the transaction
+   with `SELECT … FOR UPDATE` — the conditional write done properly.
+3. **`-opaque-writes=forward`**, if your application maintains `version` itself. Then the binlog
+   tailer's invalidation carries a newer version and is applied. Only correct under that condition.
+
+## The trade: a connection is the session
+
+A bare SQL connection has nowhere to hold a session token, so the proxy keeps one **per
+connection**. You get read-own-writes within a connection — the same scope MySQL itself gives you —
+and nothing stronger across a connection pool.
+
+If you need the guarantee to follow a request between services, that is what the
+[SDK](/docs/sdk) is for: it carries the token, including across an RPC boundary.
+
+## When not to use it
+
+- **You want joins cached.** Cachet caches rows by key. That is not this product's shape.
+- **You need `SELECT *` served from cache.** It cannot be, honestly, and it will not pretend.
+- **Your reads are mostly prepared statements.** They are forwarded, so the hit rate will be low —
+  a prepared statement's meaning depends on arguments the classifier has not seen.

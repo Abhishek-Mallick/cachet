@@ -35,6 +35,16 @@ builds:
     goos: [linux, darwin]
     goarch: [amd64, arm64]
 
+  - id: cachet-proxy
+    main: ./cmd/cachet-proxy
+    binary: cachet-proxy
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
   - id: flux
     main: ./cmd/flux
     binary: flux
@@ -57,7 +67,7 @@ builds:
 
 archives:
   - id: default
-    ids: [cachetctl, cachet, flux, sextant]
+    ids: [cachetctl, cachet, cachet-proxy, flux, sextant]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:

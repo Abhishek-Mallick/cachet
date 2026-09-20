@@ -24,6 +24,10 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 - **Four consistency levels chosen per request** — `STRONG`, `SESSION`, `BOUNDED(t)`, `EVENTUAL` —
   with session tokens that propagate across service hops.
 - **Negative caching**, including read-own-inserts over a cached absence.
+- **`cachet-proxy`**: the MySQL wire protocol, so an application can use Cachet with no SDK and no
+  code change. It carries writes as well as reads, so it invalidates exactly the row a write changed
+  and maintains the `version` column on the application's behalf. A write it cannot resolve to
+  specific rows is refused rather than forwarded.
 - **Leases**: origin load for a key is bounded regardless of how many callers miss at once.
 - **Adaptive admission**: per-key read:write ratios decide what is cached, with a hysteresis band
   and a minimum dwell. Off by default.
@@ -53,6 +57,12 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 
 ### Fixed
 
+- **A long-lived `SESSION` client never hit the cache.** Reading more than one key on a shard
+  produced a miss on every read, for ever, with no writes involved — 0/5 where `EVENTUAL` got 5/5.
+  Each read advanced that shard's watermark to its own fill version, so reading one key made every
+  other key's entry look too old to serve. Reads now advance by the row version observed. `SESSION`
+  is the default level, so this made the cache useless for the most ordinary usage there is.
+
 - **The CDC backstop dropped invalidations the cache could not accept.** On a tombstone error the
   tailer logged a warning, dropped the event, and advanced its checkpoint past it — so during a cache
   partition both invalidation paths lost the same write and the stale entry survived until its TTL,
@@ -71,7 +81,10 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 ### Known limitations
 
 - **The SDK is Go only.** The wire contract is gRPC (`cachet.v1`) and generating a client for
-  another language is supported, but nothing else ships today.
+  another language is supported. `cachet-proxy` covers applications that will not take an SDK at
+  all, at the cost of a per-connection session rather than one that follows a request.
+- **The proxy forwards prepared statements.** They are correct, and they are not cached: a prepared
+  statement's meaning depends on arguments the classifier has not seen.
 - **Four benchmark rows have working implementations and no published figure.** They stay blank
   until they can be measured on a host that is not a laptop VM. Read p99 is reported as *not
   measurable* in the current environment rather than rounded into a win.

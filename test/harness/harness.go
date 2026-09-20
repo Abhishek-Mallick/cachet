@@ -49,6 +49,11 @@ type Cluster struct {
 	Router *storage.Router
 	Cache  *cache.Client
 
+	// Engine is the running engine. Exposed so a suite can drive it through something other than
+	// gRPC — the MySQL-wire proxy reaches it directly, in the same process, exactly as the gRPC
+	// server does.
+	Engine *engine.Engine
+
 	stop          func()
 	originReads   func() (int, error)
 	leaseOutcomes func(string) int
@@ -263,6 +268,7 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		Addrs:  srv.Addrs(),
 		Shards: shards,
 		Router: router,
+		Engine: eng,
 		stop:   stop,
 		originReads: func() (int, error) {
 			return int(testutil.ToFloat64(metrics.Origin())), nil

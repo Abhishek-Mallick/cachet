@@ -249,10 +249,28 @@ as a shared service tier over TCP — and your application talks to it through a
 | `sextant` | The consistency verifier. Run it in shadow mode first |
 | `cachetctl` | The operator CLI |
 | `cachet-go` | A Go module — `go get github.com/Abhishek-Mallick/cachet/pkg/cachet` |
+| `cachet-proxy` | Speaks the **MySQL wire protocol**, for applications that will not take an SDK |
 
 The SDK is Go today. The contract is gRPC (`cachet.v1`), so any language that can generate a client
 can talk to it — but port the session-token handling first, because that is what carries the
 guarantee. [More on that →](./documentation/WHAT-IS-CACHET.md)
+
+### No SDK? Point your MySQL client at the proxy
+
+```bash
+cachet-proxy -config cachet.yaml -listen :3307
+mysql -h 127.0.0.1 -P 3307 -u cachet -p       # an ordinary client, no code change
+```
+
+It carries **writes as well as reads**, which is what separates it from a read-through cache: inside
+the write it resolves and invalidates exactly the row that changed, and maintains the `version`
+column your application has never heard of. A write it cannot resolve to specific rows is **refused
+with an error** rather than forwarded, because forwarding it would leave stale entries that no
+invalidation can ever reach.
+
+The trade is the session. A bare SQL connection has nowhere to hold a token, so a *connection* is
+the session — read-own-writes within a connection, and nothing stronger across a pool. Applications
+that need the guarantee to follow a request between services want the SDK.
 
 ## Guarantees, and how they are checked
 
@@ -337,7 +355,8 @@ it rides on, while CDC adds a variable delivery delay:
 
 ## Documentation
 
-**[📚 Full documentation site](./web)** — run it locally with `cd web && npm install && npm run dev`.
+**[📚 cachet.buildlab.in](https://cachet.buildlab.in)** — the documentation site. Source in
+[`web/`](./web); run it locally with `cd web && npm install && npm run dev`.
 
 | Doc | What it covers |
 |---|---|
