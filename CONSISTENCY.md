@@ -130,6 +130,12 @@ For a session `S` holding watermark `W`:
    negative entry.
 3. **Read-own-deletes.** The same holds for deletes; the read returns "not found", not the old value.
 4. **Monotonic reads.** Within `S`, successive reads of `k` never move backwards in version.
+   Carried by the watermark: a read advances it to the **row version** observed, and a cached entry
+   is served only when its **fill version** is at or after the watermark. An entry filled after the
+   newest row version a session has seen cannot be hiding a write that session already observed.
+   *(Advancing by the fill version instead would be stricter and would cost the whole hit rate —
+   every read would ratchet the watermark past every other key's entry on that shard. Pinned by
+   `TestASessionReadingManyKeysStillHitsTheCache`.)*
 5. **Causal propagation across services.** If `S`'s watermark is carried across an RPC boundary (the
    SDK does this via OpenTelemetry context propagation), the downstream service inherits guarantees
    1–4 with respect to the upstream's writes.

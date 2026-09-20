@@ -276,3 +276,84 @@ func TestACachedReadReturnsTheSameRecordAsAnUncachedOne(t *testing.T) {
 		t.Errorf("version: cached %d, uncached %d", c.GetVersion(), u.GetVersion())
 	}
 }
+
+// TestASessionReadingManyKeysStillHitsTheCache pins the cost of how monotonic reads are implemented.
+//
+// CONSISTENCY.md §3.2 guarantee 4 is scoped to a KEY: "successive reads of k never move backwards
+// in version". Advancing a per-SHARD watermark to each read's fill version implements something
+// strictly stronger — no entry filled before the newest fill this session has seen on that shard may
+// be served — and that stronger rule costs the entire hit rate, because every read ratchets the
+// watermark past every other key's entry on the shard.
+//
+// A guarantee implemented more strongly than it is documented cannot fail a correctness test. It can
+// only fail a test like this one, which is why this one exists.
+func TestASessionReadingManyKeysStillHitsTheCache(t *testing.T) {
+	e := newEnv(t, config{synchronousInvalidation: true})
+
+	const keys = 5
+	all := make([]string, 0, keys)
+	for i := 0; i < keys; i++ {
+		k := e.key()
+		all = append(all, k)
+		put(t, e, k, "v1", nil)
+	}
+
+	// One session, carried across every read, exactly as a long-lived client holds it. No writes
+	// happen after this point, so nothing legitimately invalidates anything.
+	var tok *cachetv1.SessionToken
+	lvl := levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_SESSION}
+
+	for _, k := range all { // warm
+		tok = get(t, e, k, lvl, tok).GetSession()
+	}
+
+	hits := 0
+	for _, k := range all {
+		resp := get(t, e, k, lvl, tok)
+		tok = resp.GetSession()
+		if resp.GetMeta().GetCacheHit() {
+			hits++
+		}
+	}
+
+	if hits != keys {
+		t.Errorf("a session that read %d warm keys on one shard got %d cache hits, want %d.\n"+
+			"Every read advances the shard watermark to its own fill version, so reading one key "+
+			"makes every other key's entry look too old to serve. The entries are present and "+
+			"correct; they are simply never used.", keys, hits, keys)
+	}
+}
+
+// TestMonotonicReadsSurviveAMixOfLevels is the guarantee that justifies advancing on reads at all.
+//
+// A session reads k at STRONG — which bypasses the cache and therefore sees a write another session
+// made — and then reads k at SESSION. If the cache still holds the pre-write entry, serving it would
+// move that session's view of k BACKWARDS, which §3.2 guarantee 4 forbids.
+//
+// This is the case that makes "just stop advancing on reads" the wrong fix, and it must keep passing
+// whatever the implementation does with the watermark.
+func TestMonotonicReadsSurviveAMixOfLevels(t *testing.T) {
+	// Invalidation OFF. With it on, the writer's tombstone removes the entry and the read has
+	// nowhere stale to be served from — the test would pass without exercising the rule.
+	e := newEnv(t, config{synchronousInvalidation: false})
+	key := e.key()
+
+	put(t, e, key, "v1", nil)
+	warm(t, e, key) // the cache now holds v1, and nothing will remove it
+
+	// A DIFFERENT session writes v2. Our session has never seen this write.
+	put(t, e, key, "v2", nil)
+
+	strong := get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_STRONG}, nil)
+	if got := string(strong.GetRecord().GetPayload()); got != "v2" {
+		t.Fatalf("STRONG read returned %q, want v2 — it must not be served from the cache", got)
+	}
+
+	// Now SESSION, carrying what STRONG observed. The stale v1 entry is still in the cache.
+	session := get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_SESSION},
+		strong.GetSession())
+	if got := string(session.GetRecord().GetPayload()); got != "v2" {
+		t.Errorf("SESSION read returned %q after the same session had already seen v2 at STRONG: "+
+			"the session's view of this key moved backwards", got)
+	}
+}

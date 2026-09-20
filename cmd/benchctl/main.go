@@ -653,7 +653,12 @@ func faultsCmd(args []string) error {
 	if err := os.WriteFile(outPath, []byte(faults.Render(records)), 0o600); err != nil {
 		return fmt.Errorf("benchctl faults: write %s: %w", outPath, err)
 	}
-	fmt.Printf("wrote %s from %d fault record(s) of %d planned\n", *out, len(records), len(faults.Catalogue))
+	// Distinct faults, not raw records: the suite runs under -count=2 and records each fault twice.
+	distinct := map[int]bool{}
+	for _, r := range records {
+		distinct[r.Number] = true
+	}
+	fmt.Printf("wrote %s: %d of %d faults\n", *out, len(distinct), len(faults.Catalogue))
 	return nil
 }
 

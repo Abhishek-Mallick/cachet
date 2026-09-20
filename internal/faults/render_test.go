@@ -87,3 +87,27 @@ func TestNoRecordsRendersNoClaimOfCoverage(t *testing.T) {
 		t.Errorf("an empty run did not say so plainly:\n%s", got)
 	}
 }
+
+// The chaos suite runs under `-count=2`, so every fault records itself twice. Left alone that
+// rendered "Coverage: 18 of 9" — a number that is not merely wrong but impossible, in a document
+// whose entire job is to be checkable.
+func TestARepeatedRunDoesNotInflateCoverage(t *testing.T) {
+	t.Parallel()
+
+	rec := sample()[0]
+	second := rec
+	second.Fired = "a second run, with different counts"
+
+	got := faults.Render([]faults.Record{rec, second})
+
+	if !strings.Contains(got, "1 of 9") {
+		t.Errorf("two records of the same fault were counted as two:\n%s", got)
+	}
+	if strings.Count(got, "## 1. "+rec.Title) != 1 {
+		t.Errorf("the fault was rendered twice:\n%s", got)
+	}
+	// The newest observation wins: a rerun is a fresher measurement, not a duplicate to discard.
+	if !strings.Contains(got, "a second run, with different counts") {
+		t.Errorf("the later record was dropped in favour of the earlier one:\n%s", got)
+	}
+}

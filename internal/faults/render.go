@@ -41,7 +41,19 @@ var Catalogue = map[int]string{
 
 // Render produces FAULTS.md.
 func Render(records []Record) string {
-	sorted := append([]Record(nil), records...)
+	// One entry per fault, keeping the LAST observation of each.
+	//
+	// The chaos suite runs under -count=2, so every fault records itself twice; without this the
+	// document counted them separately and reported "18 of 9". A rerun is a fresher measurement of
+	// the same fault, not a second fault, and the fresher one is the one worth publishing.
+	latest := make(map[int]Record, len(records))
+	for _, r := range records {
+		latest[r.Number] = r
+	}
+	sorted := make([]Record, 0, len(latest))
+	for _, r := range latest {
+		sorted = append(sorted, r)
+	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Number < sorted[j].Number })
 
 	covered := make(map[int]bool, len(sorted))

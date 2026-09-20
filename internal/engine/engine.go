@@ -241,7 +241,7 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 
 	entry, served, lease := e.fromCacheOrLease(ctx, reqmt, key.String(), id, token)
 	if served {
-		token.Advance(string(id), entry.FillVersion)
+		token.Advance(string(id), entry.RowVersion)
 		// A negative entry is a hit that reports absence. Serving it as found=false is what makes
 		// "this row does not exist" a cacheable answer rather than a guaranteed database query.
 		return &cachetv1.GetResponse{
@@ -258,7 +258,11 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 	case errors.Is(err, storage.ErrNotFound):
 		// Absence is an answer, not an error: "this row does not exist" is a cacheable fact, and an
 		// insert must later invalidate that negative entry.
-		token.Advance(string(id), uint64(fill))
+		//
+		// Nothing advances here: an absent row has no version, so there is no version a later read
+		// of this key could move backwards from. Read-own-inserts is carried by the INSERT
+		// advancing the watermark, not by this read.
+		_ = fill
 		e.fillNegativeHoldingLease(ctx, key.String(), fill, lease)
 		return &cachetv1.GetResponse{
 			Found:   false,
@@ -271,7 +275,19 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 
 	// Observing advances the watermark, which is what gives monotonic reads without any extra
 	// state (CONSISTENCY.md §3.2).
-	token.Advance(string(id), uint64(fill))
+	//
+	// By the ROW's version, not the read's fill version. The guarantee is scoped to a key —
+	// "successive reads of k never move backwards in version" — and a fill version is "when we
+	// looked", which has nothing to do with k. Advancing by the fill version implements a far
+	// stronger rule, that no entry filled before the newest fill this session has seen on this
+	// shard may be served, and that rule costs the entire hit rate: every read ratchets the
+	// watermark past every other key's entry, so a session reading more than one key on a shard
+	// never gets a hit again.
+	//
+	// The row version is enough. An entry is served only when its FILL version is at or after the
+	// watermark, and an entry filled after the newest row version this session has observed cannot
+	// be hiding a write the session has already seen.
+	token.Advance(string(id), uint64(rec.Version))
 	e.fillHoldingLease(ctx, key.String(), rec, fill, lease)
 
 	return &cachetv1.GetResponse{
@@ -549,7 +565,10 @@ func (e *Engine) BatchGet(ctx context.Context, req *cachetv1.BatchGetRequest) (*
 		if err != nil {
 			return nil, e.rpcError(ctx, "batch get", err)
 		}
-		token.Advance(string(shardID), uint64(fill))
+		// The newest ROW version in this batch, for the reason given in Get.
+		for _, rec := range rows {
+			token.Advance(string(shardID), uint64(rec.Version))
+		}
 		if fill > newest {
 			newest = fill
 		}

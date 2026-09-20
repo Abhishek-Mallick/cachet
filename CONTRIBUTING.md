@@ -110,28 +110,30 @@ A pull request merges only when all of this is green. No `--no-verify`.
 | Tidy | `make tidy` |
 | Unit + race | `go test -race -count=2 ./...` |
 | Integration | `make test-integration` |
+| Consistency | `make test-consistency` — the conformance matrix, including the cells required to FAIL |
+| End to end | `make test-e2e` |
+| Faults | `make test-chaos`, and `FAULTS.md` must still cover all nine |
+| Docs site | `npm run build` in `web/` |
 | Env budget | `make env-up` in under 90 s |
 | Build matrix | linux/amd64, linux/arm64, darwin/arm64 |
 | Vulnerabilities | `make vuln` |
 
 `-count=2` is deliberate: it catches tests that pass only because of state left by their first run.
 
-### Not yet gated, and run locally
+### Running the slower suites locally
 
-These suites need the compose stack rather than testcontainers, so they are not in CI today. **Run
-them yourself before opening a pull request that touches the read path**, and say in the PR which
-ones you ran.
+CI runs all of these, but they are slower than `make test-unit` and worth running yourself before
+opening a pull request that touches the read path.
 
-| Suite | Command | Why it matters |
-|---|---|---|
-| Consistency | `make test-consistency` | The conformance matrix, including the cells required to FAIL against a naive cache |
-| End to end | `make test-e2e` | Leases, CDC, shadow mode, shutdown, topology |
-| Faults | `make env-chaos-up && make test-chaos` | Regenerates the evidence behind `FAULTS.md` |
+| Suite | Command |
+|---|---|
+| Consistency | `make test-consistency` |
+| End to end | `make test-e2e` |
+| Faults | `make env-chaos-up && make test-chaos` |
 
-This is a known gap and it is tracked, not accepted: the conformance matrix and the fault record are
-the two artefacts this project's credibility rests on, and neither is currently enforced by anything
-but discipline. A suite that only runs when somebody remembers is a suite that will eventually be
-wrong without anyone noticing.
+`FAULTS.md` is generated from what the fault suite observed. If you add or rename a fault, run
+`make test-chaos && make faults` and commit the result — CI checks that every fault in the
+catalogue still has an entry.
 
 ---
 

@@ -100,6 +100,101 @@ jobs:
       - if: always()
         run: make env-down
 
+  # The two suites the entire pitch rests on. Until 2026-09-19 neither ran here, and CONSISTENCY.md
+  # and FAULTS.md were held true by whoever remembered to run them. A suite that runs only when
+  # somebody remembers is a suite that will eventually be wrong with nobody noticing — and the
+  # failure mode is silent, which is the kind this project exists to eliminate.
+  #
+  # They need the compose stack rather than testcontainers, which is why they are separate jobs: the
+  # stack takes time to come up and there is no reason to pay for it twice in one job.
+  consistency:
+    name: conformance matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - run: make env-up
+      # Includes the cells that are REQUIRED to fail against a deliberately naive cache. A
+      # consistency suite that has never failed is proving nothing.
+      - run: make test-consistency
+      - if: always()
+        run: make env-down
+
+  e2e:
+    name: end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - run: make env-up
+      - run: make test-e2e
+      - if: always()
+        run: make env-down
+
+  chaos:
+    name: injected faults
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with: { go-version: "${{ env.GO_VERSION }}", cache: true }
+      - run: make env-chaos-up
+      - run: make test-chaos
+
+      # FAULTS.md is generated from what the suite observed, so regenerating it here is what stops
+      # the document drifting from the suite that produced it.
+      #
+      # Asserted structurally rather than byte-for-byte. Entries carry the evidence each injection
+      # fired — breaker counts, error totals — and those legitimately differ between runs. A diff
+      # check would fail on a healthy run, which trains people to ignore it. What must not change is
+      # the COVERAGE: every fault in the catalogue still recorded, by a suite that just passed.
+      - name: FAULTS.md still covers every fault
+        run: |
+          set -euo pipefail
+          make faults
+          if ! grep -q '^\*\*Coverage: 9 of 9\.\*\*$' FAULTS.md; then
+            echo "::error::FAULTS.md does not report full coverage after a passing chaos run."
+            grep -n 'Coverage:' FAULTS.md || true
+            exit 1
+          fi
+          for n in 1 2 3 4 5 6 7 8 9; do
+            grep -q "^| $n | ✅ " FAULTS.md || {
+              echo "::error::fault $n has no entry in FAULTS.md"; exit 1; }
+          done
+          echo "FAULTS.md covers all 9 faults"
+
+      # The generated document is committed, so a regeneration that changes its STRUCTURE — a new
+      # fault, a renamed one — has to be committed too. Evidence-only churn is expected and ignored.
+      - name: the document's structure is committed
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- FAULTS.md; then
+            if git diff -U0 -- FAULTS.md | grep -E '^[+-]\| [0-9]+ \|' | grep -qv 'failing\|shedding\|= [0-9]'; then
+              echo "::error::FAULTS.md structure changed. Run 'make test-chaos && make faults' and commit."
+              git --no-pager diff -- FAULTS.md
+              exit 1
+            fi
+            echo "only per-run evidence changed; nothing to commit"
+          fi
+      - if: always()
+        run: make env-down
+
+  # The documentation site. It had nine pages and nothing compiled it, so the first person to learn
+  # it was broken would have been a reader.
+  docs-site:
+    name: docs site builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
   vuln:
     name: govulncheck
     runs-on: ubuntu-latest
