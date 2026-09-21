@@ -138,20 +138,30 @@ jobs:
         if: github.event_name == 'push'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-          IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.binary }}
+          REPO: ${{ github.repository }}
+          BINARY: ${{ matrix.binary }}
         # Signing the digest, never a tag. A tag can be moved after signing; a digest cannot.
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        #
+        # Lowercased: an image reference must be, and a GitHub owner need not be. The push itself
+        # never hit this because docker/metadata-action lowercases for you — so the image published
+        # and only the signature failed, which is the worst half to lose.
+        run: |
+          image=$(echo "${{ env.REGISTRY }}/${REPO}/${BINARY}" | tr '[:upper:]' '[:lower:]')
+          cosign sign --yes "${image}@${DIGEST}"
 
       - name: publish the digest
         if: github.event_name == 'push'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          REPO: ${{ github.repository }}
+          BINARY: ${{ matrix.binary }}
         run: |
+          image=$(echo "${{ env.REGISTRY }}/${REPO}/${BINARY}" | tr '[:upper:]' '[:lower:]')
           {
-            echo "### \`${{ matrix.binary }}\`"
+            echo "### \`${BINARY}\`"
             echo
             echo '```'
-            echo "${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.binary }}@${DIGEST}"
+            echo "${image}@${DIGEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -182,6 +192,11 @@ jobs:
         run: |
           set -euo pipefail
           v="${VERSION#v}"
+          # OCI repository names must be lowercase, and a GitHub owner need not be. The images job
+          # never hit this because docker/metadata-action lowercases for you; helm does not, and
+          # says only `invalid reference: invalid repository`, which names the value and not the
+          # rule it broke.
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
           helm package deploy/helm/cachet --version "$v" --app-version "$v"
-          helm push "cachet-${v}.tgz" oci://ghcr.io/${{ github.repository_owner }}/charts
+          helm push "cachet-${v}.tgz" "oci://ghcr.io/${owner}/charts"
