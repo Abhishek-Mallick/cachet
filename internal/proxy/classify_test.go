@@ -320,3 +320,62 @@ func TestTheRewriteStillRefusesTheDangerousShapes(t *testing.T) {
 		}
 	}
 }
+
+// Prepared statements carry their values as arguments, so the classifier has to recognise the
+// placeholder and say WHICH argument supplies the id.
+func TestAPlaceholderIdIsRecognised(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		q     string
+		kind  proxy.Kind
+		param int
+	}{
+		{"SELECT payload FROM entities WHERE id = ?", proxy.PointSelect, 0},
+		{"select status, payload from entities where id = ?", proxy.PointSelect, 0},
+		{"UPDATE entities SET payload = ? WHERE id = ?", proxy.PointWrite, 1},
+		{"UPDATE entities SET status = ?, payload = ? WHERE id = ?", proxy.PointWrite, 2},
+		{"DELETE FROM entities WHERE id = ?", proxy.PointWrite, 0},
+	} {
+		p := proxy.Classify(table, tc.q)
+		if p.Kind != tc.kind {
+			t.Errorf("Classify(%q) = %v, want %v", tc.q, p.Kind, tc.kind)
+			continue
+		}
+		if !p.IDIsParam {
+			t.Errorf("Classify(%q) did not report the id as a parameter", tc.q)
+			continue
+		}
+		if p.IDParam != tc.param {
+			t.Errorf("Classify(%q) says argument %d supplies the id, want %d", tc.q, p.IDParam, tc.param)
+		}
+	}
+}
+
+// A placeholder anywhere the classifier cannot account for means it does not know what the
+// statement will do when executed, so it refuses to claim anything about it.
+func TestAPlaceholderItCannotAccountForIsPassedThrough(t *testing.T) {
+	t.Parallel()
+
+	for _, q := range []string{
+		"SELECT payload FROM entities WHERE id = ? AND tenant_id = ?",
+		"SELECT payload FROM entities WHERE tenant_id = ?",
+		"UPDATE entities SET status = 1 WHERE tenant_id = ?",
+		"SELECT payload FROM entities WHERE id = ? LIMIT ?",
+	} {
+		p := proxy.Classify(table, q)
+		if p.Kind == proxy.PointSelect || p.Kind == proxy.PointWrite {
+			t.Errorf("Classify(%q) = %v, want Passthrough or OpaqueWrite", q, p.Kind)
+		}
+	}
+}
+
+// A literal id must not be reported as a parameter, or the handler would look for an argument that
+// does not exist.
+func TestALiteralIdIsNotAParameter(t *testing.T) {
+	t.Parallel()
+
+	if p := proxy.Classify(table, "SELECT payload FROM entities WHERE id = 42"); p.IDIsParam {
+		t.Error("a literal id was reported as a parameter")
+	}
+}

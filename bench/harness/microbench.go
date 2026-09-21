@@ -283,12 +283,104 @@ func trendCell(cur, prev map[string]BenchResult) string {
 		allocDelta += cur[name].AllocsPerOp - prev[name].AllocsPerOp
 	}
 
+	if allocDelta == 0 && looksLikeHostEffect(cur, prev, shared) {
+		// Every benchmark moved the same way by a similar amount, and nothing allocated
+		// differently. Code changes do not do that; quieter runners do.
+		return fmt.Sprintf("≈ %+.0f%% · host?", pct)
+	}
+
 	cell := fmt.Sprintf("%s %+.0f%%", trendBar(pct), pct)
 	if allocDelta != 0 {
 		cell += fmt.Sprintf(" · allocs %+d", allocDelta)
 	}
 	return cell
 }
+
+// looksLikeHostEffect reports whether a commit's movement is better explained by the machine than
+// by the code.
+//
+// Observed on 2026-09-18: a commit touching only a Makefile, a README, a Dockerfile and a Helm
+// chart came back 23-25% faster across five unrelated benchmarks with zero change in allocations,
+// and the trend column reported a 25% improvement. Nothing on the request path had changed.
+//
+// The three conditions together are what make it safe to say so. Any one alone would be wrong:
+// unrelated benchmarks do sometimes move together, a real optimisation can leave allocations alone,
+// and small movements are noise either way.
+func looksLikeHostEffect(cur, prev map[string]BenchResult, shared []string) bool {
+	// Two benchmarks moving together is a coincidence; several is a pattern.
+	if len(shared) < 3 {
+		return false
+	}
+
+	deltas := make([]float64, 0, len(shared))
+	for _, name := range shared {
+		c, p := cur[name], prev[name]
+		if c.NsPerOp <= 0 || p.NsPerOp <= 0 {
+			return false
+		}
+		deltas = append(deltas, (c.NsPerOp/p.NsPerOp-1)*100)
+	}
+
+	lo, hi := deltas[0], deltas[0]
+	for _, d := range deltas {
+		// One benchmark moving the other way means something real happened.
+		if (d > 0) != (deltas[0] > 0) {
+			return false
+		}
+		lo, hi = math.Min(lo, d), math.Max(hi, d)
+	}
+
+	// Below the noise floor there is nothing to explain either way, and above a tight spread the
+	// benchmarks are not moving uniformly — one of them changed more than the others, which is what
+	// a code change looks like.
+	return math.Abs(lo) >= uniformShiftFloor && hi-lo <= uniformShiftSpread
+}
+
+// uniform reports whether every movement shares a direction and a rough magnitude.
+func uniform(deltas []float64) bool {
+	if len(deltas) < 3 {
+		return false
+	}
+	lo, hi := deltas[0], deltas[0]
+	for _, d := range deltas {
+		if (d > 0) != (deltas[0] > 0) {
+			return false
+		}
+		lo, hi = math.Min(lo, d), math.Max(hi, d)
+	}
+	return math.Abs(lo) >= uniformShiftFloor && hi-lo <= uniformShiftSpread
+}
+
+// allocationsFlat reports whether no benchmark's allocation count moved across the whole history.
+// Allocation counts do not depend on how busy a machine is, so one that moved means the code did.
+func allocationsFlat(rows []BenchRow, names []string) bool {
+	for _, name := range names {
+		var seen []int64
+		for _, r := range rows {
+			for _, res := range r.Results {
+				if res.Name == name {
+					seen = append(seen, res.AllocsPerOp)
+				}
+			}
+		}
+		for _, a := range seen {
+			if a != seen[0] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+const (
+	// uniformShiftFloor is the smallest movement worth calling anything at all.
+	uniformShiftFloor = 10.0
+
+	// uniformShiftSpread is how far apart the individual movements may be and still count as one
+	// shift. Ten points is wide enough for runner variance and narrow enough that an optimisation
+	// of one code path, which moves one benchmark far more than the rest, falls outside it.
+	uniformShiftSpread = 10.0
+)
 
 // trendBar draws the magnitude of a change, growing in the direction of the change.
 //
@@ -332,6 +424,7 @@ func renderTrendSection(b *strings.Builder, rows []BenchRow, names []string) {
 	for _, n := range names {
 		width = max(width, len(strings.TrimPrefix(n, "Benchmark")))
 	}
+	endToEnd := make([]float64, 0, len(names))
 
 	for _, name := range names {
 		var series []float64
@@ -356,8 +449,16 @@ func renderTrendSection(b *strings.Builder, rows []BenchRow, names []string) {
 		fmt.Fprintf(b, "%-*s  %s  %s → %s  (%+.0f%%)\n",
 			width, strings.TrimPrefix(name, "Benchmark"), Sparkline(series),
 			formatNs(oldest), formatNs(newest), pct)
+		endToEnd = append(endToEnd, pct)
 	}
 	b.WriteString("```\n")
+
+	if uniform(endToEnd) && allocationsFlat(rows, names) {
+		b.WriteString("\nEvery benchmark above moved the same way by a similar amount, and no " +
+			"allocation count\nchanged. That is usually the MACHINE rather than the code: " +
+			"unrelated code paths do not\nget uniformly faster together, and a change that made " +
+			"them faster would almost always\nshow up in allocations too.\n")
+	}
 }
 
 // RerenderBenchTable redraws an existing history with the current renderer, adding no row.

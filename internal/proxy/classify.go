@@ -59,6 +59,13 @@ type Plan struct {
 	// exactly these, named exactly this way, or it has answered a different question.
 	Columns []string
 
+	// IDIsParam reports that the id arrives as a bound argument rather than a literal, and IDParam
+	// is which one. Prepared statements are how most applications talk to MySQL — any query given
+	// arguments becomes one — so a proxy that only understood literal SQL would cache nothing for
+	// them and, worse, would forward their WRITES without maintaining the version column.
+	IDIsParam bool
+	IDParam   int
+
 	// BeginsTransaction and EndsTransaction are reported even though the statement is forwarded:
 	// inside a transaction a cached read can contradict what the transaction has already written,
 	// so the connection stops serving from the cache until it ends.
@@ -88,20 +95,24 @@ func Classify(cachedTable, query string) Plan {
 
 	if m := pointSelectRe.FindStringSubmatch(q); m != nil {
 		cols, ok := cacheableColumns(m[1])
+		if !ok || !tableMatches(cachedTable, m[2]) {
+			return Plan{}
+		}
+		p, ok := idTarget(q, m[3])
 		if !ok {
 			return Plan{}
 		}
-		if id, ok := parseID(m[3]); ok && tableMatches(cachedTable, m[2]) {
-			return Plan{Kind: PointSelect, ID: id, Columns: cols}
-		}
-		return Plan{}
+		p.Kind, p.Columns = PointSelect, cols
+		return p
 	}
 
 	if m := pointWriteRe.FindStringSubmatch(q); m != nil {
 		// m[1] is the UPDATE table, m[3] the DELETE table; exactly one is non-empty.
-		name := m[1] + m[3]
-		if id, ok := parseID(m[4]); ok && tableMatches(cachedTable, name) {
-			return Plan{Kind: PointWrite, ID: id}
+		if name := m[1] + m[3]; tableMatches(cachedTable, name) {
+			if p, ok := idTarget(q, m[4]); ok {
+				p.Kind = PointWrite
+				return p
+			}
 		}
 	}
 
@@ -128,12 +139,12 @@ var (
 	// LIMIT, which keeps FOR UPDATE, UNION, ORDER BY and extra predicates out.
 	pointSelectRe = regexp.MustCompile(
 		`^select\s+([a-z0-9_$,` + "`" + `\s]+?)\s+from\s+` + ident +
-			`\s+where\s+` + "`?id`?" + `\s*=\s*([0-9]+)\s*(?:limit\s+1\s*)?$`)
+			`\s+where\s+` + "`?id`?" + `\s*=\s*([0-9]+|\?)\s*(?:limit\s+1\s*)?$`)
 
 	// Either UPDATE <t> SET ... WHERE id = n, or DELETE FROM <t> WHERE id = n.
 	pointWriteRe = regexp.MustCompile(
 		`^(?:update\s+` + ident + `\s+set\s+([^;]*?)|delete\s+from\s+` + ident + `)` +
-			`\s+where\s+` + "`?id`?" + `\s*=\s*([0-9]+)\s*$`)
+			`\s+where\s+` + "`?id`?" + `\s*=\s*([0-9]+|\?)\s*$`)
 
 	// Anything that modifies a table, used only to notice writes to the cached one.
 	anyWriteRe = regexp.MustCompile(
@@ -143,6 +154,65 @@ var (
 			`|replace\s+into\s+` + ident +
 			`|truncate\s+(?:table\s+)?` + ident + `)\b`)
 )
+
+// boundID resolves the row id for one execution, from the literal or from the arguments.
+//
+// It reports false for anything it cannot turn into a row id with certainty — a missing argument,
+// a negative number, a string that is not a number. The caller then forwards the statement, which
+// is always safe.
+func (p Plan) boundID(args []any) (uint64, bool) {
+	if !p.IDIsParam {
+		return p.ID, p.ID != 0
+	}
+	if p.IDParam < 0 || p.IDParam >= len(args) {
+		return 0, false
+	}
+	switch v := args[p.IDParam].(type) {
+	case uint64:
+		return v, v != 0
+	case int64:
+		if v <= 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case int:
+		if v <= 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case string:
+		id, err := strconv.ParseUint(v, 10, 64)
+		return id, err == nil && id != 0
+	case []byte:
+		id, err := strconv.ParseUint(string(v), 10, 64)
+		return id, err == nil && id != 0
+	default:
+		return 0, false
+	}
+}
+
+// idTarget resolves where the row id comes from: a literal, or a bound argument.
+//
+// When it is a placeholder, the argument index is the number of placeholders before it. Every
+// placeholder in the statement must be accounted for — one the classifier has not placed means it
+// does not know what the statement will do once bound, and it refuses rather than guess.
+func idTarget(q, token string) (Plan, bool) {
+	if token != "?" {
+		id, ok := parseID(token)
+		return Plan{ID: id}, ok
+	}
+
+	idx := strings.LastIndex(q, "?")
+	if idx < 0 {
+		return Plan{}, false
+	}
+	// The id placeholder must be the LAST one: both recognised shapes end with `WHERE id = ?`, so
+	// anything after it is a shape this does not understand.
+	if strings.Count(q[idx+1:], "?") != 0 {
+		return Plan{}, false
+	}
+	return Plan{IDIsParam: true, IDParam: strings.Count(q[:idx], "?")}, true
+}
 
 // cacheable is what a cache entry actually holds.
 //

@@ -247,3 +247,78 @@ func TestAReadInsideATransactionIsNotServedFromTheCache(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 }
+
+// A prepared write must not be able to break invalidation.
+//
+// This is not a hypothetical path: go-sql-driver prepares any statement given arguments, which is
+// how most applications write. If a prepared UPDATE reaches the database without its version bump,
+// every invalidation for that row loses its compare-and-set and the stale entry never clears —
+// silently, which is the failure this project exists to eliminate.
+func TestAPreparedWriteCannotBreakInvalidation(t *testing.T) {
+	db, _ := startProxy(t, proxy.RefuseOpaqueWrites)
+	const id = 9_400_010
+	seedRow(t, id, "v1")
+
+	ctx := context.Background()
+	read := fmt.Sprintf("SELECT payload FROM entities WHERE id = %d", id)
+	var payload []byte
+	for i := 0; i < 2; i++ { // warm it
+		if err := db.QueryRowContext(ctx, read).Scan(&payload); err != nil {
+			t.Fatalf("warm: %v", err)
+		}
+	}
+
+	// Arguments, so the driver uses COM_STMT_PREPARE / COM_STMT_EXECUTE rather than plain text.
+	if _, err := db.ExecContext(ctx,
+		"UPDATE entities SET payload = ? WHERE id = ?", "v2", id); err != nil {
+		t.Fatalf("prepared update: %v", err)
+	}
+
+	if err := db.QueryRowContext(ctx, read).Scan(&payload); err != nil {
+		t.Fatalf("read after prepared write: %v", err)
+	}
+	if string(payload) != "v2" {
+		t.Fatalf("read after a PREPARED write returned %q, want v2 — the version bump and the "+
+			"invalidation did not happen on the prepared path", payload)
+	}
+}
+
+// And the refusal has to hold on the prepared path too, or it is trivially bypassed by adding an
+// argument to the statement.
+func TestAPreparedOpaqueWriteIsAlsoRefused(t *testing.T) {
+	db, _ := startProxy(t, proxy.RefuseOpaqueWrites)
+
+	_, err := db.ExecContext(context.Background(),
+		"UPDATE entities SET status = ? WHERE tenant_id = ?", 1, 424244)
+	if err == nil {
+		t.Fatal("an opaque write was accepted because it was prepared; the refusal is bypassable")
+	}
+	if !strings.Contains(err.Error(), "cannot resolve") {
+		t.Errorf("the error does not explain the problem: %v", err)
+	}
+}
+
+// A prepared point read should be served from the cache, which is the whole point of phase D.
+func TestAPreparedReadIsServedFromTheCache(t *testing.T) {
+	db, cluster := startProxy(t, proxy.RefuseOpaqueWrites)
+	const id = 9_400_011
+	seedRow(t, id, "v1")
+
+	ctx := context.Background()
+	const q = "SELECT payload FROM entities WHERE id = ?"
+	var payload []byte
+	if err := db.QueryRowContext(ctx, q, id).Scan(&payload); err != nil {
+		t.Fatalf("first prepared read: %v", err)
+	}
+
+	before := cluster.CacheOpsForTest("get", "hit")
+	if err := db.QueryRowContext(ctx, q, id).Scan(&payload); err != nil {
+		t.Fatalf("second prepared read: %v", err)
+	}
+	if string(payload) != "v1" {
+		t.Fatalf("prepared read returned %q, want v1", payload)
+	}
+	if cluster.CacheOpsForTest("get", "hit") == before {
+		t.Error("a prepared point read was not served from the cache")
+	}
+}

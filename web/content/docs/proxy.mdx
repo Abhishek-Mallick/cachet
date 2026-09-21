@@ -42,8 +42,10 @@ cost is a cache miss. Classifying one as cacheable when it is not is a correctne
 | `UPDATE entities SET payload = 'x' WHERE id = 42` | Forwarded with a version bump, then that row invalidated |
 | `DELETE FROM entities WHERE id = 42` | Forwarded, then that row invalidated |
 | `UPDATE entities SET status = 1 WHERE tenant_id = 9` | **Refused** — see below |
-| Joins, aggregates, subqueries, `FOR UPDATE`, prepared statements | Passed through |
+| Joins, aggregates, subqueries, `FOR UPDATE` | Passed through |
 | Anything inside a transaction | Passed through — a transaction may have written rows nobody else can see, and the cache is nobody else |
+| `SELECT payload FROM entities WHERE id = ?` *(prepared)* | Served from the cache, same rules |
+| `UPDATE entities SET payload = ? WHERE id = ?` *(prepared)* | Version-bumped and invalidated, same rules |
 
 ### Why an unresolvable write is refused rather than forwarded
 
@@ -65,6 +67,30 @@ Three ways forward, in order of preference:
 3. **`-opaque-writes=forward`**, if your application maintains `version` itself. Then the binlog
    tailer's invalidation carries a newer version and is applied. Only correct under that condition.
 
+## Prepared statements
+
+Treated exactly like literal SQL, and that is a correctness requirement rather than a feature.
+
+Most drivers — `go-sql-driver` among them — turn any query given arguments into a prepared
+statement, so this is how most applications write. The template is classified once at
+`COM_STMT_PREPARE`, where the text is available; a `PointWrite` template is rewritten with the
+version bump *there*, and every argument index the client sends is unchanged because the rewrite
+adds no placeholder.
+
+<Callout type="warn" title="Why this is not optional">
+  A proxy that forwarded prepared statements untouched would let writes reach the database without
+  their version bump, so every invalidation for those rows would lose its compare-and-set and the
+  stale entries would never clear. The refusal has to apply here too, or it is bypassed by adding
+  an argument to the statement.
+
+  Cachet shipped with exactly that defect for a day. `TestAPreparedWriteCannotBreakInvalidation`
+  exists so it cannot come back.
+</Callout>
+
+The id may be a literal or a bound argument; the classifier records which argument supplies it.
+Anything with a placeholder it cannot account for — `WHERE id = ? AND tenant_id = ?`, or
+`LIMIT ?` — is passed through, because it does not know what the statement will do once bound.
+
 ## The trade: a connection is the session
 
 A bare SQL connection has nowhere to hold a session token, so the proxy keeps one **per
@@ -78,5 +104,4 @@ If you need the guarantee to follow a request between services, that is what the
 
 - **You want joins cached.** Cachet caches rows by key. That is not this product's shape.
 - **You need `SELECT *` served from cache.** It cannot be, honestly, and it will not pretend.
-- **Your reads are mostly prepared statements.** They are forwarded, so the hit rate will be low —
-  a prepared statement's meaning depends on arguments the classifier has not seen.
+- **Your reads are analytical.** Point lookups by primary key are what this caches.

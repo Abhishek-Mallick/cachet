@@ -179,7 +179,7 @@ func (c *conn) HandleQuery(query string) (*gomysql.Result, error) {
 		if c.inTx {
 			break
 		}
-		res, served, err := c.cachedRead(plan)
+		res, served, err := c.cachedRead(plan, false)
 		if err != nil {
 			c.srv.log.Warn("proxy: cached read failed, falling through to the database",
 				"id", plan.ID, "err", err)
@@ -211,7 +211,7 @@ func (c *conn) HandleQuery(query string) (*gomysql.Result, error) {
 
 // cachedRead answers a point select from Cachet, returning served=false when the caller should ask
 // the database instead.
-func (c *conn) cachedRead(plan Plan) (*gomysql.Result, bool, error) {
+func (c *conn) cachedRead(plan Plan, binary bool) (*gomysql.Result, bool, error) {
 	resp, err := c.srv.opts.Engine.Get(c.ctx, &cachetv1.GetRequest{
 		Key:     c.srv.opts.CachedTable + ":" + strconv.FormatUint(plan.ID, 10),
 		Level:   cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_SESSION,
@@ -224,7 +224,7 @@ func (c *conn) cachedRead(plan Plan) (*gomysql.Result, bool, error) {
 
 	if !resp.GetFound() {
 		// An absent row is a real answer, and an empty result set is how SQL says it.
-		rs, err := gomysql.BuildSimpleResultset(plan.Columns, nil, false)
+		rs, err := gomysql.BuildSimpleResultset(plan.Columns, nil, binary)
 		if err != nil {
 			return nil, false, err
 		}
@@ -242,7 +242,7 @@ func (c *conn) cachedRead(plan Plan) (*gomysql.Result, bool, error) {
 		row = append(row, v)
 	}
 
-	rs, err := gomysql.BuildSimpleResultset(plan.Columns, [][]any{row}, false)
+	rs, err := gomysql.BuildSimpleResultset(plan.Columns, [][]any{row}, binary)
 	if err != nil {
 		return nil, false, err
 	}
@@ -307,34 +307,114 @@ func (c *conn) HandleFieldList(table string, fieldWildcard string) ([]*gomysql.F
 	return c.up.FieldList(table, fieldWildcard)
 }
 
-// Prepared statements are forwarded whole and never served from the cache.
+// prepared is one COM_STMT_PREPARE, and what the proxy decided about it.
 //
-// The classifier reasons about a statement's text; a prepared statement's meaning depends on
-// arguments it has not seen yet. Answering one from the cache would mean re-deriving the plan per
-// execution against bound parameters, which is a second classifier and a second way to be wrong.
-// Until that is worth building, these go to the database and are simply correct.
+// The plan is computed ONCE, here, from the statement text — which is the only time the text is
+// available. Re-deriving it per execution would be a second classifier and a second way to be
+// wrong about what a statement means.
+type prepared struct {
+	stmt *client.Stmt
+	plan Plan
+}
+
+// HandleStmtPrepare classifies the template and applies the same rules the text path applies.
+//
+// This is not an optimisation. go-sql-driver — and most drivers — turn any query given arguments
+// into a prepared statement, so this is how most applications write. A proxy that forwarded them
+// untouched would let writes reach the database without their version bump, and every invalidation
+// for those rows would lose its compare-and-set. The refusal has to hold here too, or it is
+// bypassed by adding an argument.
 func (c *conn) HandleStmtPrepare(query string) (int, int, any, error) {
-	stmt, err := c.up.Prepare(query)
+	plan := Classify(c.srv.opts.CachedTable, query)
+
+	upstreamSQL := query
+	switch plan.Kind {
+	case OpaqueWrite:
+		if c.srv.opts.OpaqueWrites == RefuseOpaqueWrites {
+			return 0, 0, nil, fmt.Errorf(
+				"cachet proxy: refusing a write to %q it cannot resolve to specific rows: %s. "+
+					"Rewrite it as a single-row statement, use the Cachet SDK, or set "+
+					"opaque_writes=forward if this application maintains the version column itself",
+				c.srv.opts.CachedTable, firstWords(query))
+		}
+	case PointWrite:
+		rewritten, ok := rewriteWithVersionBump(query)
+		if !ok {
+			return 0, 0, nil, fmt.Errorf(
+				"cachet proxy: could not maintain the version column for: %s", firstWords(query))
+		}
+		// The rewrite adds `version = version + 1`, which introduces no placeholder, so every
+		// argument index the client will send is unchanged.
+		upstreamSQL = rewritten
+	}
+
+	stmt, err := c.up.Prepare(upstreamSQL)
 	if err != nil {
 		return 0, 0, nil, err
 	}
-	return stmt.ParamNum(), stmt.ColumnNum(), stmt, nil
+	return stmt.ParamNum(), stmt.ColumnNum(), &prepared{stmt: stmt, plan: plan}, nil
 }
 
 func (c *conn) HandleStmtExecute(ctx any, _ string, args []any) (*gomysql.Result, error) {
-	stmt, ok := ctx.(*client.Stmt)
+	p, ok := ctx.(*prepared)
 	if !ok {
 		return nil, errors.New("cachet proxy: unknown prepared statement")
 	}
-	return stmt.Execute(args...)
+
+	id, known := p.plan.boundID(args)
+
+	switch {
+	case p.plan.Kind == PointSelect && known && !c.inTx:
+		plan := p.plan
+		plan.ID = id
+		// binary: a prepared statement's rows go back in the binary protocol. Encoding them as
+		// text produces "malformed packet" at the client, which says nothing about the cause.
+		res, served, err := c.cachedRead(plan, true)
+		if err != nil {
+			c.srv.log.Warn("proxy: cached read failed, falling through to the database",
+				"id", id, "err", err)
+			break
+		}
+		if served {
+			return res, nil
+		}
+
+	case p.plan.Kind == PointWrite && known:
+		return c.executePreparedWrite(p, args, id)
+	}
+
+	return p.stmt.Execute(args...)
+}
+
+// executePreparedWrite runs an already-rewritten write and invalidates the row it changed.
+func (c *conn) executePreparedWrite(p *prepared, args []any, id uint64) (*gomysql.Result, error) {
+	key := c.srv.opts.CachedTable + ":" + strconv.FormatUint(id, 10)
+
+	before, err := c.rowVersion(id)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := p.stmt.Execute(args...)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.invalidate(key, before+1); err != nil {
+		// The write is committed. Reporting an error now would say the write failed when it did
+		// not; the CDC tailer is the backstop for exactly this.
+		c.srv.log.Warn("proxy: invalidation failed after a committed write; the tailer must catch it",
+			"key", key, "err", err)
+	}
+	return res, nil
 }
 
 func (c *conn) HandleStmtClose(ctx any) error {
-	stmt, ok := ctx.(*client.Stmt)
+	p, ok := ctx.(*prepared)
 	if !ok {
 		return nil
 	}
-	return stmt.Close()
+	return p.stmt.Close()
 }
 
 func (c *conn) HandleOtherCommand(cmd byte, _ []byte) error {

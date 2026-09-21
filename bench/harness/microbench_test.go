@@ -392,3 +392,128 @@ func TestTheTrendSectionStatesTheMagnitude(t *testing.T) {
 		t.Errorf("a 1%% move is drawn as a full-range sparkline with no magnitude beside it:\n%s", second[idx:])
 	}
 }
+
+// A commit that touches nothing on the request path cannot make every benchmark faster at once.
+//
+// This happened on 2026-09-18: commit 16bbd2d changed a Makefile, a README, a Dockerfile and a Helm
+// chart, and every one of five unrelated benchmarks came back 23–25% faster with zero change in
+// allocations. That is a quieter runner, and the trend column reported it as a 25% improvement.
+//
+// Uniform direction across unrelated benchmarks, similar magnitude, and flat allocation counts is
+// mechanically detectable, so it gets labelled rather than celebrated.
+func TestAUniformShiftIsLabelledAsAHostEffect(t *testing.T) {
+	t.Parallel()
+
+	prev := harness.BenchRow{
+		Commit: "aaa1111", Date: "2026-09-17",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 1000, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 40, AllocsPerOp: 0},
+			{Name: "BenchmarkC", NsPerOp: 200, AllocsPerOp: 2},
+		},
+	}
+	// Everything ~25% faster, allocations untouched.
+	cur := harness.BenchRow{
+		Commit: "bbb2222", Date: "2026-09-18",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 750, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 30, AllocsPerOp: 0},
+			{Name: "BenchmarkC", NsPerOp: 152, AllocsPerOp: 2},
+		},
+	}
+
+	got := harness.RenderBenchTable([]byte(harness.RenderBenchTable(nil, prev, 10)), cur, 10)
+	if !strings.Contains(got, "· host?") {
+		t.Errorf("a uniform 25%% shift with flat allocations was not labelled a host effect:\n%s", got)
+	}
+}
+
+// A real change does not move everything by the same amount, and usually moves allocations.
+func TestARealChangeIsNotLabelledAsAHostEffect(t *testing.T) {
+	t.Parallel()
+
+	prev := harness.BenchRow{
+		Commit: "aaa1111", Date: "2026-09-17",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 1000, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 40, AllocsPerOp: 0},
+			{Name: "BenchmarkC", NsPerOp: 200, AllocsPerOp: 2},
+		},
+	}
+	// One benchmark improves sharply; the others barely move. This is what optimising one thing
+	// looks like, and it must not be explained away as the runner being quiet.
+	cur := harness.BenchRow{
+		Commit: "bbb2222", Date: "2026-09-18",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 250, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 40, AllocsPerOp: 0},
+			{Name: "BenchmarkC", NsPerOp: 198, AllocsPerOp: 2},
+		},
+	}
+
+	got := harness.RenderBenchTable([]byte(harness.RenderBenchTable(nil, prev, 10)), cur, 10)
+	if strings.Contains(got, "· host?") {
+		t.Errorf("a genuine single-benchmark improvement was dismissed as a host effect:\n%s", got)
+	}
+}
+
+// Allocations are deterministic: if they moved, the code moved, whatever the runner was doing.
+func TestAnAllocationChangeIsNeverAHostEffect(t *testing.T) {
+	t.Parallel()
+
+	prev := harness.BenchRow{
+		Commit: "aaa1111", Date: "2026-09-17",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 1000, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 40, AllocsPerOp: 1},
+			{Name: "BenchmarkC", NsPerOp: 200, AllocsPerOp: 2},
+		},
+	}
+	cur := harness.BenchRow{
+		Commit: "bbb2222", Date: "2026-09-18",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 750, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 30, AllocsPerOp: 0}, // one allocation gone
+			{Name: "BenchmarkC", NsPerOp: 152, AllocsPerOp: 2},
+		},
+	}
+
+	got := harness.RenderBenchTable([]byte(harness.RenderBenchTable(nil, prev, 10)), cur, 10)
+	if strings.Contains(got, "· host?") {
+		t.Errorf("allocations changed, so the code changed; this is not a host effect:\n%s", got)
+	}
+}
+
+// The uniform shift that prompted this was visible end-to-end across the history rather than
+// between two adjacent commits: five unrelated benchmarks each ~23% faster from the oldest row to
+// the newest, with allocations flat throughout. Five lines all reading -2x% invite the conclusion
+// that the code got faster, so the section says what that pattern usually means.
+func TestTheTrendSectionNotesAnEndToEndUniformShift(t *testing.T) {
+	t.Parallel()
+
+	table := harness.RenderBenchTable(nil, harness.BenchRow{
+		Commit: "aaa1111", Date: "2026-09-17",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 1000, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 40, AllocsPerOp: 0},
+			{Name: "BenchmarkC", NsPerOp: 200, AllocsPerOp: 2},
+		},
+	}, 10)
+	table = harness.RenderBenchTable([]byte(table), harness.BenchRow{
+		Commit: "bbb2222", Date: "2026-09-18",
+		Results: []harness.BenchResult{
+			{Name: "BenchmarkA", NsPerOp: 770, AllocsPerOp: 3},
+			{Name: "BenchmarkB", NsPerOp: 30, AllocsPerOp: 0},
+			{Name: "BenchmarkC", NsPerOp: 154, AllocsPerOp: 2},
+		},
+	}, 10)
+
+	idx := strings.Index(table, "## Trend")
+	if idx < 0 {
+		t.Fatal("no trend section")
+	}
+	if !strings.Contains(strings.ToLower(table[idx:]), "machine") {
+		t.Errorf("every benchmark moved the same way by a similar amount and the section does not "+
+			"say what that usually means:\n%s", table[idx:])
+	}
+}
