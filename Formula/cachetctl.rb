@@ -1,0 +1,48 @@
+# Cachet's operator CLI.
+#
+# This formula lives in the main repository rather than a separate `homebrew-cachet` tap, so there
+# is one repository to maintain and the release workflow can write it with the token it already
+# has. Homebrew is happy to tap any repository when given its URL:
+#
+#     brew tap abhishek-mallick/cachet https://github.com/Abhishek-Mallick/cachet
+#     brew install cachetctl
+#
+# Regenerated on every release. Do not edit by hand.
+class Cachetctl < Formula
+  desc "Operator CLI for Cachet - health, routing, key inspection, benchmarks"
+  homepage "https://github.com/Abhishek-Mallick/cachet"
+  version "0.1.0"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/cachet_0.1.0_darwin_arm64.tar.gz"
+      sha256 "0a62df87bbf200085a29c34de22a0142c514942e28b493e86c5c3ab03ecc6edf"
+    end
+    on_intel do
+      url "https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/cachet_0.1.0_darwin_amd64.tar.gz"
+      sha256 "52a3f869efcdd67ca387d7a4d78bbff92fca0c05bcff43f68f4c4d6b77370828"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/cachet_0.1.0_linux_arm64.tar.gz"
+      sha256 "a8bcf27a73d06a847b1014c5f8acdce41c49919bb5a14ed76814839b1b4c0ae5"
+    end
+    on_intel do
+      url "https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/cachet_0.1.0_linux_amd64.tar.gz"
+      sha256 "71ae138e8a3902761469286bcf7aec3b828254d935499ce7e099fb6596a07b82"
+    end
+  end
+
+  def install
+    # Only the operator CLI. The engine belongs in a container next to a service, not in a
+    # developer's /usr/local/bin.
+    bin.install "cachetctl"
+  end
+
+  test do
+    assert_match "cachetctl", shell_output("#{bin}/cachetctl version")
+  end
+end
