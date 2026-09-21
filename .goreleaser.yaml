@@ -105,6 +105,11 @@ homebrew_casks:
       owner: Abhishek-Mallick
       name: homebrew-cachet
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      # A missing tap must not fail the release. The binaries, the images and the GitHub release
+      # are what a stranger actually needs; the cask is a convenience on top, and the workflow
+      # skips this section entirely when no token is configured.
+      pull_request:
+        enabled: false
     directory: Casks
     homepage: https://github.com/Abhishek-Mallick/cachet
     description: Operator CLI for Cachet — health, routing, key inspection, benchmarks
@@ -144,7 +149,11 @@ changelog:
       - '\[skip ci\]'
 
 release:
-  draft: true
+  # Published, not a draft: a draft is invisible on the repository profile, and the release is how
+  # a stranger gets a binary without cloning anything.
+  draft: false
+  # v0.1.0 has no pre-release suffix, so `auto` publishes it as a normal release. A tag like
+  # v0.2.0-rc1 would be marked pre-release without any change here.
   prerelease: auto
   header: |
     ## Cachet {{ .Version }}

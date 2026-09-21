@@ -51,16 +51,33 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - uses: anchore/sbom-action/download-syft@v0
 
+      # The Homebrew cask publishes into a SEPARATE repository, which GITHUB_TOKEN cannot reach, so
+      # it needs its own token. Everything else — the GitHub release, the binaries, the checksums,
+      # the signatures — needs nothing but this workflow. Missing the token must therefore skip the
+      # cask, not fail the release.
+      - id: tap
+        run: |
+          if [ -n "${{ secrets.HOMEBREW_TAP_TOKEN }}" ]; then
+            echo "skip=" >> "$GITHUB_OUTPUT"
+            echo "The Homebrew cask will be published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=--skip=homebrew" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Homebrew cask skipped"
+              echo
+              echo 'No `HOMEBREW_TAP_TOKEN` is configured, so the cask was not published.'
+              echo 'The release, binaries, checksums and signatures are unaffected.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
           args: >-
-            release --clean
+            release --clean ${{ steps.tap.outputs.skip }}
             ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--snapshot --skip=publish,sign' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # A separate token: publishing to the tap repository is a different permission from
-          # publishing here, and GITHUB_TOKEN cannot reach another repository.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   images:
