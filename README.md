@@ -161,7 +161,14 @@ the benchmarks more interesting.
 **v0.1.0 is released.** Binaries, images and the Helm chart are published and signed.
 
 ```bash
-# Binaries — every release is signed, and this is how you check before running anything
+# Homebrew — the formula lives in this repository, so there is no second repo to tap
+brew tap abhishek-mallick/cachet https://github.com/Abhishek-Mallick/cachet
+brew trust abhishek-mallick/cachet     # Homebrew asks this of every third-party tap
+brew install cachetctl
+```
+
+```bash
+# Or the binaries directly — every release is signed, and this is how you check before running it
 curl -LO https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/cachet_0.1.0_darwin_arm64.tar.gz
 curl -LO https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/checksums.txt
 shasum -a 256 -c checksums.txt --ignore-missing
@@ -186,9 +193,7 @@ cosign verify-blob checksums.txt --certificate checksums.txt.pem --signature che
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-<sub>Homebrew is not published yet — it needs a tap repository, and the release does not wait for
-one. Until then the binaries above are the install path. Full verification steps, including images:
-[`SECURITY.md`](./.github/SECURITY.md).</sub>
+<sub>Full verification steps, including container images: [`SECURITY.md`](./.github/SECURITY.md).</sub>
 
 ## Quickstart
 

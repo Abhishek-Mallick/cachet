@@ -41,7 +41,7 @@ jobs:
       - run: make test-unit
 
   binaries:
-    name: signed binaries · homebrew
+    name: signed binaries
     needs: verify
     runs-on: ubuntu-latest
     permissions:
@@ -55,34 +55,14 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - uses: anchore/sbom-action/download-syft@v0
 
-      # The Homebrew cask publishes into a SEPARATE repository, which GITHUB_TOKEN cannot reach, so
-      # it needs its own token. Everything else — the GitHub release, the binaries, the checksums,
-      # the signatures — needs nothing but this workflow. Missing the token must therefore skip the
-      # cask, not fail the release.
-      - id: tap
-        run: |
-          if [ -n "${{ secrets.HOMEBREW_TAP_TOKEN }}" ]; then
-            echo "skip=" >> "$GITHUB_OUTPUT"
-            echo "The Homebrew cask will be published." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "skip=--skip=homebrew" >> "$GITHUB_OUTPUT"
-            {
-              echo "### Homebrew cask skipped"
-              echo
-              echo 'No `HOMEBREW_TAP_TOKEN` is configured, so the cask was not published.'
-              echo 'The release, binaries, checksums and signatures are unaffected.'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
           args: >-
-            release --clean ${{ steps.tap.outputs.skip }}
+            release --clean
             ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--snapshot --skip=publish,sign' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   images:
     name: images · ${{ matrix.binary }}
@@ -200,3 +180,52 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
           helm package deploy/helm/cachet --version "$v" --app-version "$v"
           helm push "cachet-${v}.tgz" "oci://ghcr.io/${owner}/charts"
+
+  formula:
+    name: homebrew formula
+    needs: binaries
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # main, not the tag: a tap reads the default branch, so that is where the formula has to land.
+      - uses: actions/checkout@v5
+        with: { ref: main }
+
+      # From the checksums the release actually published, never from the build directory — the
+      # formula must describe the bytes a user will download.
+      - name: regenerate from the published checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release download "$VERSION" -R "${{ github.repository }}" -p checksums.txt -D /tmp
+          python3 scripts/gen-homebrew-formula.py --version "${VERSION#v}" --checksums /tmp/checksums.txt
+
+      - name: commit it
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Formula/; then
+            echo "formula already current"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/
+          git commit -m "homebrew: formula for ${{ github.ref_name }} [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: how to install
+        run: |
+          {
+            echo "### Homebrew"
+            echo
+            echo '```bash'
+            echo "brew tap abhishek-mallick/cachet https://github.com/${{ github.repository }}"
+            echo "brew trust abhishek-mallick/cachet"
+            echo "brew install cachetctl"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
