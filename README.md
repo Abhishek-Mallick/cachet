@@ -158,32 +158,35 @@ the benchmarks more interesting.
 
 ## Install
 
-Nothing below requires cloning this repository.
+**Pre-1.0, and nothing is published yet.** Build from source — it is two commands and about twenty
+seconds:
 
 ```bash
-# The operator CLI — health, routing, key inspection, and `bench quick` against your own database
-brew install Abhishek-Mallick/cachet/cachetctl
-
-# Or a signed binary, verified before you run it
-cosign verify-blob checksums.txt \
-  --certificate checksums.txt.pem --signature checksums.txt.sig \
-  --certificate-identity-regexp 'https://github.com/Abhishek-Mallick/cachet/.*' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+git clone https://github.com/Abhishek-Mallick/cachet && cd cachet
+make build            # cachet · cachet-proxy · flux · sextant · cachetctl · benchctl → ./bin
 ```
 
+```go
+import "github.com/Abhishek-Mallick/cachet/pkg/cachet"   // the SDK, at a commit for now
+```
+
+<details>
+<summary>What installing will look like once <code>v0.1.0</code> is tagged</summary>
+
+The release pipeline is written and validated — `goreleaser check` passes, the images build, the
+chart renders — but **it has never run**, so none of these commands work yet and they are folded
+away rather than presented as if they do.
+
 ```bash
-# The engine, as a sidecar. Signed by digest, because a tag can be moved after signing.
+brew install Abhishek-Mallick/cachet/cachetctl
 docker pull ghcr.io/abhishek-mallick/cachet/cachet:v0.1.0
 helm install cachet oci://ghcr.io/abhishek-mallick/charts/cachet --version 0.1.0
 ```
 
-```go
-import "github.com/Abhishek-Mallick/cachet/pkg/cachet"   // go get github.com/Abhishek-Mallick/cachet
-```
+Each release is signed with Sigstore keyless signing; verification steps are in
+[`SECURITY.md`](./.github/SECURITY.md).
 
-<sub>Pre-1.0 and not yet tagged: the commands above describe the release pipeline in
-`.github/workflows/release.yml`, which publishes on the first tag. Until then, build from source
-with `make build`.</sub>
+</details>
 
 ## Quickstart
 

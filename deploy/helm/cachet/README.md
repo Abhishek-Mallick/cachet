@@ -1,10 +1,18 @@
 # Cachet Helm chart
 
-```bash
-helm install cachet oci://ghcr.io/abhishek-mallick/charts/cachet \
-  --version 0.1.0 \
-  --values my-values.yaml
-```
+> **Not published yet.** The chart renders and lints, and it is pushed to an OCI registry by the
+> release workflow on the first tag — which has not been cut. Until then, install it from a clone:
+>
+> ```bash
+> helm install cachet ./deploy/helm/cachet --values my-values.yaml
+> ```
+>
+> After the first release, the same chart installs without a clone:
+>
+> ```bash
+> helm install cachet oci://ghcr.io/abhishek-mallick/charts/cachet \
+>   --version 0.1.0 --values my-values.yaml
+> ```
 
 ## What this chart does and does not deploy
 

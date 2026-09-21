@@ -54,3 +54,4 @@ web/next-env.d.ts
 # The chaos suite's raw records. FAULTS.md is the artifact and is committed; the JSON behind it is
 # per-run (counts and ports differ every time), so committing it would make every run a diff.
 test/chaos/testdata/
+.gstack/
