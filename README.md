@@ -158,35 +158,37 @@ the benchmarks more interesting.
 
 ## Install
 
-**Pre-1.0, and nothing is published yet.** Build from source — it is two commands and about twenty
-seconds:
+**v0.1.0 is released.** Binaries, images and the Helm chart are published and signed.
 
 ```bash
-git clone https://github.com/Abhishek-Mallick/cachet && cd cachet
-make build            # cachet · cachet-proxy · flux · sextant · cachetctl · benchctl → ./bin
+# Binaries — every release is signed, and this is how you check before running anything
+curl -LO https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/cachet_0.1.0_darwin_arm64.tar.gz
+curl -LO https://github.com/Abhishek-Mallick/cachet/releases/download/v0.1.0/checksums.txt
+shasum -a 256 -c checksums.txt --ignore-missing
+tar xzf cachet_0.1.0_darwin_arm64.tar.gz && ./cachetctl version
 ```
-
-```go
-import "github.com/Abhishek-Mallick/cachet/pkg/cachet"   // the SDK, at a commit for now
-```
-
-<details>
-<summary>What installing will look like once <code>v0.1.0</code> is tagged</summary>
-
-The release pipeline is written and validated — `goreleaser check` passes, the images build, the
-chart renders — but **it has never run**, so none of these commands work yet and they are folded
-away rather than presented as if they do.
 
 ```bash
-brew install Abhishek-Mallick/cachet/cachetctl
-docker pull ghcr.io/abhishek-mallick/cachet/cachet:v0.1.0
+# Containers, signed by digest
+docker run --rm ghcr.io/abhishek-mallick/cachet/cachetctl:0.1.0 version
 helm install cachet oci://ghcr.io/abhishek-mallick/charts/cachet --version 0.1.0
 ```
 
-Each release is signed with Sigstore keyless signing; verification steps are in
-[`SECURITY.md`](./.github/SECURITY.md).
+```go
+import "github.com/Abhishek-Mallick/cachet/pkg/cachet"   // go get github.com/Abhishek-Mallick/cachet@v0.1.0
+```
 
-</details>
+Verifying a release — signatures are keyless, against the workflow that built it:
+
+```bash
+cosign verify-blob checksums.txt --certificate checksums.txt.pem --signature checksums.txt.sig \
+  --certificate-identity-regexp 'https://github.com/Abhishek-Mallick/cachet/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+<sub>Homebrew is not published yet — it needs a tap repository, and the release does not wait for
+one. Until then the binaries above are the install path. Full verification steps, including images:
+[`SECURITY.md`](./.github/SECURITY.md).</sub>
 
 ## Quickstart
 
