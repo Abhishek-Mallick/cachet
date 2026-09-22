@@ -4,16 +4,16 @@
 -- KEYS[2] = lease key
 -- ARGV[1] = row version    (zero-padded decimal string, see the note below)
 -- ARGV[2] = fill version   (same encoding)
--- ARGV[3] = payload
+-- ARGV[3] = encoded row
 -- ARGV[4] = "1" for a negative entry ("this row does not exist"), "0" otherwise
 -- ARGV[5] = TTL in milliseconds
--- ARGV[6] = tenant id  (decimal string)
--- ARGV[7] = status     (decimal string)
--- ARGV[8] = lease token held by this filler, or "" if it holds none
+-- ARGV[6] = schema fingerprint
+-- ARGV[7] = lease token held by this filler, or "" if it holds none
 --
--- The row fields are stored so a cache hit returns the SAME record as a cache miss. They are plain
--- decimal rather than the padded form used for versions: they are never compared, only carried, so
--- the ordering property the padding exists for does not apply to them.
+-- The row is stored whole so that a cache hit returns the SAME record as a cache miss. It is opaque
+-- here: this script never looks inside it, which is why an arbitrary user table needs no change to
+-- the compare-and-set below. The fingerprint travels with it so a reader expecting a different
+-- shape treats the entry as a miss rather than decoding it into the wrong columns.
 --
 -- Returns 1 if the fill was applied, 0 if it lost the compare-and-set.
 --
@@ -35,10 +35,10 @@
 -- may hold the lease and be filling. Releasing blindly would drop that second holder's lease and
 -- admit a third filler — reopening the stampede the lease had just closed, at the worst moment.
 local function releaseLease()
-  if ARGV[8] == nil or ARGV[8] == '' then
+  if ARGV[7] == nil or ARGV[7] == '' then
     return
   end
-  if redis.call('GET', KEYS[2]) == ARGV[8] then
+  if redis.call('GET', KEYS[2]) == ARGV[7] then
     redis.call('DEL', KEYS[2])
   end
 end
@@ -69,7 +69,7 @@ if rv then
   end
 end
 
-redis.call('HSET', KEYS[1], 'v', ARGV[1], 'f', ARGV[2], 'p', ARGV[3], 'n', ARGV[4], 'd', ARGV[6], 's', ARGV[7])
+redis.call('HSET', KEYS[1], 'v', ARGV[1], 'f', ARGV[2], 'r', ARGV[3], 'n', ARGV[4], 'h', ARGV[6])
 redis.call('PEXPIRE', KEYS[1], ARGV[5])
 releaseLease()
 return 1

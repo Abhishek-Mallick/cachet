@@ -21,7 +21,7 @@ import (
 
 func fill(ctx context.Context, t *testing.T, c *cache.Client, key string, rv, fv uint64, payload string) bool {
 	t.Helper()
-	applied, err := c.Fill(ctx, key, cache.Entry{RowVersion: rv, FillVersion: fv, Payload: []byte(payload)})
+	applied, err := c.Fill(ctx, key, cache.Entry{RowVersion: rv, FillVersion: fv, Row: []byte(payload)})
 	if err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
@@ -54,8 +54,8 @@ func TestFillAppliesToAnEmptyKey(t *testing.T) {
 		t.Fatal("the first fill of an empty key was rejected")
 	}
 	e, hit := mustGet(ctx, t, c, "cas:empty")
-	if !hit || string(e.Payload) != "v1" {
-		t.Errorf("Get = %q hit=%v, want \"v1\" hit=true", e.Payload, hit)
+	if !hit || string(e.Row) != "v1" {
+		t.Errorf("Get = %q hit=%v, want \"v1\" hit=true", e.Row, hit)
 	}
 }
 
@@ -67,8 +67,8 @@ func TestAHigherRowVersionWins(t *testing.T) {
 	if !fill(ctx, t, c, "cas:higher", 200, 200, "v2") {
 		t.Fatal("a newer fill was rejected")
 	}
-	if e, _ := mustGet(ctx, t, c, "cas:higher"); string(e.Payload) != "v2" {
-		t.Errorf("payload = %q, want \"v2\"", e.Payload)
+	if e, _ := mustGet(ctx, t, c, "cas:higher"); string(e.Row) != "v2" {
+		t.Errorf("payload = %q, want \"v2\"", e.Row)
 	}
 }
 
@@ -84,8 +84,8 @@ func TestALowerRowVersionIsRejected(t *testing.T) {
 	if fill(ctx, t, c, "cas:lower", 100, 100, "v1") {
 		t.Error("a stale fill overwrote a newer value")
 	}
-	if e, _ := mustGet(ctx, t, c, "cas:lower"); string(e.Payload) != "v2" {
-		t.Errorf("payload = %q, want the newer \"v2\"", e.Payload)
+	if e, _ := mustGet(ctx, t, c, "cas:lower"); string(e.Row) != "v2" {
+		t.Errorf("payload = %q, want the newer \"v2\"", e.Row)
 	}
 }
 
@@ -178,8 +178,8 @@ func TestAFillNewerThanATombstoneApplies(t *testing.T) {
 	if !fill(ctx, t, c, "cas:refill", 300, 300, "v3") {
 		t.Fatal("a fill newer than the tombstone was rejected")
 	}
-	if e, hit := mustGet(ctx, t, c, "cas:refill"); !hit || string(e.Payload) != "v3" {
-		t.Errorf("Get = %q hit=%v, want \"v3\" hit=true", e.Payload, hit)
+	if e, hit := mustGet(ctx, t, c, "cas:refill"); !hit || string(e.Row) != "v3" {
+		t.Errorf("Get = %q hit=%v, want \"v3\" hit=true", e.Row, hit)
 	}
 }
 
@@ -284,7 +284,7 @@ func TestConcurrentFillsLeaveTheHighestVersion(t *testing.T) {
 			defer wg.Done()
 			v := uint64(i)
 			if _, err := c.Fill(ctx, key, cache.Entry{
-				RowVersion: v, FillVersion: v, Payload: []byte(fmt.Sprintf("v%d", i)),
+				RowVersion: v, FillVersion: v, Row: []byte(fmt.Sprintf("v%d", i)),
 			}); err != nil {
 				t.Errorf("Fill: %v", err)
 			}
@@ -318,7 +318,7 @@ func TestVersionsNearTheDoublePrecisionLimitCompareExactly(t *testing.T) {
 	if fill(ctx, t, c, "cas:precision", lo, lo, "low") {
 		t.Error("a version one below the current one was treated as newer; versions are being rounded")
 	}
-	if e, _ := mustGet(ctx, t, c, "cas:precision"); string(e.Payload) != "high" {
-		t.Errorf("payload = %q, want \"high\"", e.Payload)
+	if e, _ := mustGet(ctx, t, c, "cas:precision"); string(e.Row) != "high" {
+		t.Errorf("payload = %q, want \"high\"", e.Row)
 	}
 }

@@ -14,7 +14,11 @@ func (c *Client) SetRawForTest(ctx context.Context, key string, badVersion strin
 	if err != nil {
 		return err
 	}
-	if err := rdb.HSet(ctx, key, "v", badVersion, "f", badVersion, "p", "", "n", "0").Err(); err != nil {
+	// The fingerprint is this client's own, so the entry passes the Lua's shape check and reaches
+	// the decoder. Without it the entry would read as a miss — which is correct behaviour for a
+	// foreign shape, and would mean this helper planted something the decoder never sees.
+	if err := rdb.HSet(ctx, key,
+		"v", badVersion, "f", badVersion, "r", "", "n", "0", "h", c.fingerprint).Err(); err != nil {
 		return fmt.Errorf("cache: set raw %s: %w", key, err)
 	}
 	return nil

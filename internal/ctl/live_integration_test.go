@@ -122,7 +122,7 @@ func TestInspectReportsBothVersions(t *testing.T) {
 	ctx := context.Background()
 	cfg, c := liveConfig(t)
 
-	if _, err := c.Fill(ctx, "entities:7", cache.Entry{RowVersion: 111, FillVersion: 222, Payload: []byte("x")}); err != nil {
+	if _, err := c.Fill(ctx, "entities:7", cache.Entry{RowVersion: 111, FillVersion: 222, Row: []byte("x")}); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestInvalidateRemovesTheEntryFromReaders(t *testing.T) {
 	ctx := context.Background()
 	cfg, c := liveConfig(t)
 
-	if _, err := c.Fill(ctx, "entities:11", cache.Entry{RowVersion: 3, FillVersion: 3, Payload: []byte("old")}); err != nil {
+	if _, err := c.Fill(ctx, "entities:11", cache.Entry{RowVersion: 3, FillVersion: 3, Row: []byte("old")}); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 
@@ -246,7 +246,7 @@ func TestInvalidateDryRunChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	cfg, c := liveConfig(t)
 
-	if _, err := c.Fill(ctx, "entities:13", cache.Entry{RowVersion: 3, FillVersion: 3, Payload: []byte("keep")}); err != nil {
+	if _, err := c.Fill(ctx, "entities:13", cache.Entry{RowVersion: 3, FillVersion: 3, Row: []byte("keep")}); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 

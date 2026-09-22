@@ -286,6 +286,14 @@ func TestFault07TailerRewound(t *testing.T) {
 		t.Fatalf("cache warmed with %q, want v2", p)
 	}
 
+	// The entry as it stands before the rewind. The row is opaque to this layer — the cache does
+	// not know which bytes are the payload — so the assertion compares the encoded row itself,
+	// which is strictly stronger: it catches any change to the entry, not just to one column.
+	before, found, err := cluster.Cache.Get(ctx, key)
+	if err != nil || !found {
+		t.Fatalf("the entry was not cached before the rewind: found=%v err=%v", found, err)
+	}
+
 	// The fault: rewind the checkpoint to before the second write and restart.
 	if err := tailer.checkpoint.Save(rewindTo); err != nil {
 		t.Fatalf("rewind the checkpoint: %v", err)
@@ -307,8 +315,9 @@ func TestFault07TailerRewound(t *testing.T) {
 			t.Fatalf("the rewound tailer evicted the cached entry for %s: an invalidation carrying "+
 				"an older version was applied to an entry filled from a newer one", key)
 		}
-		if got := string(entry.Payload); got != "v2" {
-			t.Fatalf("cached entry became %q during replay, want v2", got)
+		if string(entry.Row) != string(before.Row) || entry.RowVersion != before.RowVersion {
+			t.Fatalf("the cached entry changed during replay: version %d→%d — an old invalidation "+
+				"was allowed to act on newer state", before.RowVersion, entry.RowVersion)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

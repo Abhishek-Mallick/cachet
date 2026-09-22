@@ -120,7 +120,7 @@ func TestSetThenGetReturnsTheEntry(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	want := cache.Entry{RowVersion: 42, FillVersion: 99, Payload: []byte("payload")}
+	want := cache.Entry{RowVersion: 42, FillVersion: 99, Row: []byte("payload")}
 	if _, err := c.Fill(ctx, "entities:1", want); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestSetThenGetReturnsTheEntry(t *testing.T) {
 		t.Fatal("Get reported a miss for a key that was just set")
 	}
 	if got.RowVersion != want.RowVersion || got.FillVersion != want.FillVersion ||
-		string(got.Payload) != string(want.Payload) {
+		string(got.Row) != string(want.Row) {
 		t.Errorf("Get returned %+v, want %+v", got, want)
 	}
 }
@@ -163,7 +163,7 @@ func TestEntriesExpire(t *testing.T) {
 	}
 	defer func() { _ = short.Close() }()
 
-	if _, err := short.Fill(ctx, "entities:ttl", cache.Entry{RowVersion: 1, Payload: []byte("x")}); err != nil {
+	if _, err := short.Fill(ctx, "entities:ttl", cache.Entry{RowVersion: 1, Row: []byte("x")}); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 
@@ -203,7 +203,7 @@ func TestTombstoneRemovesTheEntryFromReaders(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	if _, err := c.Fill(ctx, "entities:del", cache.Entry{RowVersion: 1, Payload: []byte("x")}); err != nil {
+	if _, err := c.Fill(ctx, "entities:del", cache.Entry{RowVersion: 1, Row: []byte("x")}); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 	if _, err := c.Tombstone(ctx, "entities:del", 2); err != nil {
@@ -245,7 +245,7 @@ func TestConcurrentSetsAndGetsAreSafe(t *testing.T) {
 			defer wg.Done()
 			key := fmt.Sprintf("entities:conc-%d", g)
 			for i := 1; i <= 100; i++ {
-				if _, err := c.Fill(ctx, key, cache.Entry{RowVersion: uint64(i), FillVersion: uint64(i), Payload: []byte("x")}); err != nil {
+				if _, err := c.Fill(ctx, key, cache.Entry{RowVersion: uint64(i), FillVersion: uint64(i), Row: []byte("x")}); err != nil {
 					t.Errorf("Fill: %v", err)
 					return
 				}

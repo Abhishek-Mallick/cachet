@@ -18,12 +18,13 @@ func TestAnEntryRoundTripsEveryField(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
+	// The row is opaque to this layer: these bytes stand in for whatever the schema encoded. What
+	// is asserted is that they come back unchanged, because a cache hit must return the same
+	// record as a miss — and every column now lives in here.
 	want := cache.Entry{
 		RowVersion:  4242,
 		FillVersion: 9999,
-		TenantID:    77,
-		Status:      3,
-		Payload:     []byte("payload"),
+		Row:         []byte("\x01\x00payload\xff\x00binary"),
 	}
 	if _, err := c.Fill(ctx, "entities:roundtrip", want); err != nil {
 		t.Fatalf("Fill: %v", err)
@@ -37,17 +38,11 @@ func TestAnEntryRoundTripsEveryField(t *testing.T) {
 		t.Fatal("Get reported a miss for a key that was just filled")
 	}
 
-	if got.TenantID != want.TenantID {
-		t.Errorf("TenantID = %d, want %d; a cache hit returns a different row than a miss", got.TenantID, want.TenantID)
-	}
-	if got.Status != want.Status {
-		t.Errorf("Status = %d, want %d; a cache hit returns a different row than a miss", got.Status, want.Status)
-	}
 	if got.RowVersion != want.RowVersion || got.FillVersion != want.FillVersion {
 		t.Errorf("versions = (%d,%d), want (%d,%d)", got.RowVersion, got.FillVersion, want.RowVersion, want.FillVersion)
 	}
-	if string(got.Payload) != string(want.Payload) {
-		t.Errorf("Payload = %q, want %q", got.Payload, want.Payload)
+	if string(got.Row) != string(want.Row) {
+		t.Errorf("Payload = %q, want %q", got.Row, want.Row)
 	}
 }
 
@@ -55,9 +50,10 @@ func TestZeroValuedFieldsRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	// Status 0 is a legitimate value, not an absence. If the encoding could not tell "status is
-	// zero" from "status was not stored", every row in the default state would read back wrong.
-	want := cache.Entry{RowVersion: 5, FillVersion: 5, TenantID: 0, Status: 0, Payload: []byte("z")}
+	// An empty row is a legitimate value, not an absence — a table can encode to no bytes only if
+	// it has no columns, but the distinction between "stored and empty" and "not stored" is the
+	// same one that made zero-valued columns read back wrong before the row was carried whole.
+	want := cache.Entry{RowVersion: 5, FillVersion: 5, Row: []byte{}}
 	if _, err := c.Fill(ctx, "entities:roundtrip-zero", want); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
@@ -69,8 +65,11 @@ func TestZeroValuedFieldsRoundTrip(t *testing.T) {
 	if !hit {
 		t.Fatal("Get reported a miss")
 	}
-	if got.TenantID != 0 || got.Status != 0 {
-		t.Errorf("zero-valued fields came back as (%d,%d), want (0,0)", got.TenantID, got.Status)
+	if got.Negative {
+		t.Error("an entry with an empty row came back as a negative entry; 'stored and empty' is not 'row does not exist'")
+	}
+	if len(got.Row) != 0 {
+		t.Errorf("empty row came back as %q", got.Row)
 	}
 }
 

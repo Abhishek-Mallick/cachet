@@ -156,9 +156,10 @@ func StartCachedWith(ctx context.Context, t *testing.T, opts CacheOptions, liste
 
 	EnsureEnvironment(ctx, t)
 	c, err := cache.New(ctx, cache.Options{
-		Addresses: []string{cmp.Or(opts.CacheAddr, DefaultCacheAddr)},
-		TTL:       opts.TTL,
-		LeaseTTL:  opts.LeaseTTL,
+		Fingerprint: engine.Fingerprint(),
+		Addresses:   []string{cmp.Or(opts.CacheAddr, DefaultCacheAddr)},
+		TTL:         opts.TTL,
+		LeaseTTL:    opts.LeaseTTL,
 	})
 	if err != nil {
 		t.Fatalf("cache.New: %v", err)

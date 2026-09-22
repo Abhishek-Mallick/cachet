@@ -42,6 +42,32 @@ func (v Value) Equal(o Value) bool {
 	return string(v.Bytes) == string(o.Bytes)
 }
 
+// Uint64 parses the value as an unsigned integer.
+//
+// An error rather than a zero on failure: a column that will not parse is a corrupt entry or a
+// declaration that no longer matches the database, and both are worth refusing rather than
+// serving as zero.
+func (v Value) Uint64() (uint64, error) {
+	if v.IsNull {
+		return 0, fmt.Errorf("schema: value is NULL")
+	}
+	var u uint64
+	if len(v.Bytes) == 0 {
+		return 0, fmt.Errorf("schema: empty value is not an integer")
+	}
+	for _, c := range v.Bytes {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("schema: %q is not an unsigned integer", v.Bytes)
+		}
+		next := u*10 + uint64(c-'0')
+		if next < u {
+			return 0, fmt.Errorf("schema: %q overflows a uint64", v.Bytes)
+		}
+		u = next
+	}
+	return u, nil
+}
+
 // String renders the value for logs and for the CLI.
 func (v Value) String() string {
 	if v.IsNull {

@@ -163,7 +163,7 @@ func TestReadsAndWritesAgreeOnPlacement(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		key := fmt.Sprintf("agree:%d", i)
 
-		if _, err := c.Fill(ctx, key, cache.Entry{RowVersion: 10, FillVersion: 10, Payload: []byte("v1")}); err != nil {
+		if _, err := c.Fill(ctx, key, cache.Entry{RowVersion: 10, FillVersion: 10, Row: []byte("v1")}); err != nil {
 			t.Fatalf("Fill(%s): %v", key, err)
 		}
 		if _, hit, err := c.Get(ctx, key); err != nil || !hit {

@@ -71,7 +71,7 @@ func TestAHitNeedsNoLease(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	if _, err := c.Fill(ctx, "lease:hit", cache.Entry{RowVersion: 5, FillVersion: 5, Payload: []byte("v")}); err != nil {
+	if _, err := c.Fill(ctx, "lease:hit", cache.Entry{RowVersion: 5, FillVersion: 5, Row: []byte("v")}); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 
@@ -82,7 +82,7 @@ func TestAHitNeedsNoLease(t *testing.T) {
 	if res.Outcome != cache.LeaseHit {
 		t.Fatalf("Outcome = %v on a present entry, want LeaseHit", res.Outcome)
 	}
-	if string(res.Entry.Payload) != "v" || res.Entry.RowVersion != 5 {
+	if string(res.Entry.Row) != "v" || res.Entry.RowVersion != 5 {
 		t.Errorf("Entry = %+v, want the filled value", res.Entry)
 	}
 	// Taking a lease on a hit would leave a lease key behind for a fill nobody is going to do,
@@ -96,7 +96,7 @@ func TestAHitReturnsEveryField(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	want := cache.Entry{RowVersion: 11, FillVersion: 22, TenantID: 33, Status: 4, Payload: []byte("body")}
+	want := cache.Entry{RowVersion: 11, FillVersion: 22, Row: []byte("body")}
 	if _, err := c.Fill(ctx, "lease:fields", want); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
@@ -110,8 +110,8 @@ func TestAHitReturnsEveryField(t *testing.T) {
 	}
 	got := res.Entry
 	if got.RowVersion != want.RowVersion || got.FillVersion != want.FillVersion ||
-		got.TenantID != want.TenantID || got.Status != want.Status ||
-		string(got.Payload) != string(want.Payload) || got.Negative != want.Negative {
+
+		string(got.Row) != string(want.Row) || got.Negative != want.Negative {
 		t.Errorf("Entry = %+v, want %+v", got, want)
 	}
 }
@@ -143,7 +143,7 @@ func TestATombstonedEntryGrantsALease(t *testing.T) {
 	ctx := context.Background()
 	c := newClient(ctx, t)
 
-	if _, err := c.Fill(ctx, "lease:tombstoned", cache.Entry{RowVersion: 5, FillVersion: 5, Payload: []byte("old")}); err != nil {
+	if _, err := c.Fill(ctx, "lease:tombstoned", cache.Entry{RowVersion: 5, FillVersion: 5, Row: []byte("old")}); err != nil {
 		t.Fatalf("Fill: %v", err)
 	}
 	if _, err := c.Tombstone(ctx, "lease:tombstoned", 9); err != nil {
@@ -177,7 +177,7 @@ func TestFillingReleasesTheLease(t *testing.T) {
 	// Filling is what the lease was for, so completing the fill must hand it back in the same
 	// operation. Leaving it to expire would stall the next miss for the rest of the lease interval
 	// after the work it was protecting had already finished.
-	if _, err := c.FillWithLease(ctx, "lease:release", cache.Entry{RowVersion: 1, FillVersion: 1, Payload: []byte("v")}, granted.Token); err != nil {
+	if _, err := c.FillWithLease(ctx, "lease:release", cache.Entry{RowVersion: 1, FillVersion: 1, Row: []byte("v")}, granted.Token); err != nil {
 		t.Fatalf("FillWithLease: %v", err)
 	}
 

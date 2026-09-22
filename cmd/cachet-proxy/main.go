@@ -138,9 +138,10 @@ func run() error {
 		return errors.New("cachet-proxy: no cache configured; without one this is a slower MySQL")
 	}
 	cc, err := cache.New(ctx, cache.Options{
-		Addresses: cfg.Cache.Addresses,
-		TTL:       cfg.Consistency.EntryTTL,
-		LeaseTTL:  cfg.Cache.Lease.TTL,
+		Fingerprint: engine.Fingerprint(),
+		Addresses:   cfg.Cache.Addresses,
+		TTL:         cfg.Consistency.EntryTTL,
+		LeaseTTL:    cfg.Cache.Lease.TTL,
 	})
 	if err != nil {
 		return err

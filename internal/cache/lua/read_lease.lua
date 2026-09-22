@@ -4,6 +4,7 @@
 -- KEYS[2] = lease key
 -- ARGV[1] = lease token (opaque, unique per attempt)
 -- ARGV[2] = lease TTL in milliseconds
+-- ARGV[3] = the reader's schema fingerprint
 --
 -- Returns one of:
 --   {1, rv, fv, payload, negative, tenant, status}   HIT      — serve this
@@ -25,13 +26,19 @@
 -- callers still reads the database, and the CAS merely sorts out whose answer wins afterwards. The
 -- lease is what stops them being issued at all.
 
-local e = redis.call('HMGET', KEYS[1], 'v', 'f', 'p', 'n', 'd', 's')
+local e = redis.call('HMGET', KEYS[1], 'v', 'f', 'r', 'n', 'h')
 
 -- A tombstoned entry has had 'v' removed, so it falls through to the lease path exactly like an
 -- absent one. That is deliberate: an invalidated hot key is when a stampede is MOST likely, because
 -- the invalidation and the traffic peak are usually the same event.
-if e[1] then
-  return {1, e[1], e[2], e[3], e[4], e[5], e[6]}
+--
+-- An entry written for a DIFFERENT SCHEMA falls through here too, and it must fall through to the
+-- LEASE path rather than be discovered as unusable by the caller afterwards. A schema change
+-- invalidates every entry at once; if each reader merely learned that later, every one of them
+-- would go to the origin with no lease protecting it — a fleet-wide stampede at the exact moment a
+-- deployment is already in motion.
+if e[1] and e[5] == ARGV[3] then
+  return {1, e[1], e[2], e[3], e[4]}
 end
 
 -- SET NX is the whole admission decision: exactly one caller can win it, and PX guarantees the key

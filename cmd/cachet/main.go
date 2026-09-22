@@ -97,10 +97,11 @@ func run() error {
 	var cacheClient engine.Cache
 	if len(cfg.Cache.Addresses) > 0 {
 		cc, err := cache.New(ctx, cache.Options{
-			Addresses: cfg.Cache.Addresses,
-			TTL:       cfg.Consistency.EntryTTL,
-			LeaseTTL:  cfg.Cache.Lease.TTL,
-			Breaker:   breakerOptions(cfg.Cache.Breaker),
+			Fingerprint: engine.Fingerprint(),
+			Addresses:   cfg.Cache.Addresses,
+			TTL:         cfg.Consistency.EntryTTL,
+			LeaseTTL:    cfg.Cache.Lease.TTL,
+			Breaker:     breakerOptions(cfg.Cache.Breaker),
 		})
 		if err != nil {
 			return err

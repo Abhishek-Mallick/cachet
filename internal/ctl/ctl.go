@@ -314,10 +314,12 @@ func Inspect(ctx context.Context, c *cache.Client, cfg config.Config, key string
 
 	insp.Cached = true
 	insp.Entry = &EntryView{
-		RowVersion:   entry.RowVersion,
-		FillVersion:  entry.FillVersion,
-		Negative:     entry.Negative,
-		PayloadBytes: len(entry.Payload),
+		RowVersion:  entry.RowVersion,
+		FillVersion: entry.FillVersion,
+		Negative:    entry.Negative,
+		// The encoded row, not the payload column: the cache no longer knows which column is
+		// which, and the size an operator wants is what the entry actually occupies.
+		PayloadBytes: len(entry.Row),
 	}
 
 	ttl, present, err := c.RemainingTTL(ctx, loc.Key)

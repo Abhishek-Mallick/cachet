@@ -429,12 +429,17 @@ func (e *Engine) fillHoldingLease(ctx context.Context, key string, rec storage.R
 	if e.cache == nil {
 		return
 	}
+	row, err := encodeRecord(rec)
+	if err != nil {
+		// A row that will not encode must not be cached: the next reader would get a decode error
+		// where a database read would have worked. Logged and skipped, so the read still succeeds.
+		e.log.Warn("cache fill skipped; the row did not encode", "key", key, "err", err)
+		return
+	}
 	entry := cache.Entry{
 		RowVersion:  uint64(rec.Version),
 		FillVersion: uint64(fillVersion),
-		TenantID:    rec.TenantID,
-		Status:      rec.Status,
-		Payload:     rec.Payload,
+		Row:         row,
 	}
 	e.applyFillHoldingLease(ctx, key, entry, lease)
 }
@@ -725,11 +730,19 @@ func cacheHitMeta(level consistency.Level, entry cache.Entry) *cachetv1.ReadMeta
 // different status depending on whether the cache happened to be warm. The conformance suite caught
 // it; TestACachedReadReturnsTheSameRecordAsAnUncachedOne keeps it caught.
 func entryToProto(id uint64, entry cache.Entry) *cachetv1.Record {
+	rec, err := decodeRecord(entry.Row)
+	if err != nil {
+		// Unreachable on a healthy entry: the Lua only returns rows whose fingerprint matches this
+		// build's, so the shape is known before the bytes are read. Returning the versions with an
+		// empty row is the conservative answer if it ever happens — wrong in the same direction as
+		// a miss rather than in the direction of inventing column values.
+		return &cachetv1.Record{Id: id, Version: entry.RowVersion}
+	}
 	return &cachetv1.Record{
 		Id:       id,
-		TenantId: entry.TenantID,
-		Status:   uint32(entry.Status),
-		Payload:  entry.Payload,
+		TenantId: rec.TenantID,
+		Status:   uint32(rec.Status),
+		Payload:  rec.Payload,
 		Version:  entry.RowVersion,
 	}
 }

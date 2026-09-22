@@ -7,8 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
-	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -41,6 +39,13 @@ var (
 
 // Options configures a Client.
 type Options struct {
+	// Fingerprint identifies the row shape this client reads and writes.
+	//
+	// It is compared inside the Lua on every read, so an entry written for a different schema
+	// reads as a miss and takes the lease path. Empty is allowed and means "no schema declared",
+	// which is what the uncached baseline and the tests that predate descriptors use.
+	Fingerprint string
+
 	// Addresses are the cache servers. Valkey is the default and Redis is supported; they speak the
 	// same protocol and Lua (ADR 0002).
 	Addresses []string
@@ -99,6 +104,9 @@ type Client struct {
 	breakers *breaker.Group
 	ttl      time.Duration
 	leaseTTL time.Duration
+
+	// fingerprint is sent with every read and written with every fill. See Options.
+	fingerprint string
 }
 
 // New connects to every cache node and verifies each one answers.
@@ -144,11 +152,12 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 	}
 
 	c := &Client{
-		router:   router,
-		pools:    make(map[string]*redis.Client, len(router.Nodes())),
-		breakers: breakers,
-		ttl:      opts.TTL,
-		leaseTTL: leaseTTL,
+		router:      router,
+		pools:       make(map[string]*redis.Client, len(router.Nodes())),
+		breakers:    breakers,
+		ttl:         opts.TTL,
+		leaseTTL:    leaseTTL,
+		fingerprint: opts.Fingerprint,
 	}
 	for _, addr := range router.Nodes() {
 		rdb := redis.NewClient(&redis.Options{
@@ -253,7 +262,7 @@ func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
 		return Entry{}, false, nil
 	}
 
-	res, err := readScript.Run(ctx, rdb, []string{key}).Slice()
+	res, err := readScript.Run(ctx, rdb, []string{key}, c.fingerprint).Slice()
 	switch {
 	case errors.Is(err, redis.Nil):
 		// A miss is a healthy answer. Counting it as a failure would shed traffic to a node whose
@@ -273,7 +282,7 @@ func (c *Client) Get(ctx context.Context, key string) (Entry, bool, error) {
 	if len(res) == 0 {
 		return Entry{}, false, nil
 	}
-	if len(res) != 6 {
+	if len(res) != 4 {
 		return Entry{}, false, fmt.Errorf("cache: get %s: %w: %d fields", key, ErrCorruptEntry, len(res))
 	}
 
@@ -328,11 +337,10 @@ func (c *Client) FillWithLease(ctx context.Context, key string, e Entry, token s
 	applied, err := fillCAS.Run(ctx, rdb, []string{key, leaseKey(key)},
 		encodeVersion(e.RowVersion),
 		encodeVersion(e.FillVersion),
-		e.Payload,
+		e.Row,
 		negative,
 		c.ttl.Milliseconds(),
-		e.TenantID,
-		e.Status,
+		c.fingerprint,
 		token,
 	).Int64()
 	if err != nil {
@@ -408,7 +416,7 @@ func (c *Client) GetOrLease(ctx context.Context, key string) (LeaseResult, error
 	}
 
 	res, err := readLease.Run(ctx, rdb, []string{key, leaseKey(key)},
-		token, c.leaseTTL.Milliseconds(),
+		token, c.leaseTTL.Milliseconds(), c.fingerprint,
 	).Slice()
 	if err != nil {
 		b.Failure()
@@ -426,7 +434,7 @@ func (c *Client) GetOrLease(ctx context.Context, key string) (LeaseResult, error
 
 	switch tag {
 	case 1:
-		if len(res) != 7 {
+		if len(res) != 5 {
 			return LeaseResult{}, fmt.Errorf("cache: get-or-lease %s: %w: %d fields", key, ErrCorruptEntry, len(res))
 		}
 		entry, err := entryFromLua(res[1:])
@@ -514,9 +522,9 @@ func entryFromLua(res []any) (Entry, error) {
 		}
 	}
 
-	var payload []byte
-	if p, ok := res[2].(string); ok {
-		payload = []byte(p)
+	var row []byte
+	if r, ok := res[2].(string); ok {
+		row = []byte(r)
 	}
 
 	negative := false
@@ -524,77 +532,15 @@ func entryFromLua(res []any) (Entry, error) {
 		negative = n == "1"
 	}
 
-	// The row fields are optional on read: an entry written by an older build carries neither, and
-	// reading it as a zero-valued row is better than failing the request. It reads as a slightly
-	// wrong record exactly once, until the TTL or the next write replaces it.
-	tenantID, err := decodeTenantID(res[4])
-	if err != nil {
-		return Entry{}, err
-	}
-	status, err := decodeStatus(res[5])
-	if err != nil {
-		return Entry{}, err
-	}
-
 	return Entry{
 		RowVersion:  rv,
 		FillVersion: fv,
-		TenantID:    tenantID,
-		Status:      status,
-		Payload:     payload,
+		Row:         row,
 		Negative:    negative,
 	}, nil
 }
 
-// decodeTenantID and decodeStatus narrow the entry's row fields.
-//
-// The range check after parsing is redundant with the bit width handed to ParseUint, and it is kept
-// because it makes the invariant local: a reader — and the overflow linter — can see that the
-// conversion cannot wrap without having to reason about an argument three lines up.
-func decodeTenantID(raw any) (uint32, error) {
-	v, err := decodeSmall(raw, 32)
-	if err != nil {
-		return 0, fmt.Errorf("%w: tenant id: %w", ErrCorruptEntry, err)
-	}
-	if v > math.MaxUint32 {
-		return 0, fmt.Errorf("%w: tenant id %d does not fit in a uint32", ErrCorruptEntry, v)
-	}
-	return uint32(v), nil
-}
-
-func decodeStatus(raw any) (uint8, error) {
-	v, err := decodeSmall(raw, 8)
-	if err != nil {
-		return 0, fmt.Errorf("%w: status: %w", ErrCorruptEntry, err)
-	}
-	if v > math.MaxUint8 {
-		return 0, fmt.Errorf("%w: status %d does not fit in a uint8", ErrCorruptEntry, v)
-	}
-	return uint8(v), nil
-}
-
-// decodeSmall parses one of the entry's narrow numeric fields.
-//
-// A missing field decodes as zero rather than as an error, so an entry written before these fields
-// existed still reads. A field that is PRESENT but unparseable is an error, because that means
-// something other than Cachet is writing to these keys — which is worth surfacing rather than
-// rounding to zero.
-func decodeSmall(raw any, bits int) (uint64, error) {
-	s, ok := raw.(string)
-	if !ok || s == "" {
-		return 0, nil
-	}
-	v, err := strconv.ParseUint(s, 10, bits)
-	if err != nil {
-		return 0, fmt.Errorf("bad value %q", s)
-	}
-	return v, nil
-}
-
-// Flush removes every entry.
-//
-// It exists for tests and for operator recovery, never for the request path: dropping the whole
-// cache to fix one key is how a stale-data incident becomes an availability incident.
+// Flush empties every node. Test and operator tooling only.
 func (c *Client) Flush(ctx context.Context) error {
 	// Every node, not just the first. A Flush that cleared one node would leave an operator
 	// believing the cache was empty while the rest of it kept serving entries.
