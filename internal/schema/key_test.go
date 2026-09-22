@@ -66,11 +66,16 @@ func TestDistinctValuesNeverProduceOneKey(t *testing.T) {
 	// Each pair is a classic separator-injection collision: ("a:b","c") and ("a","b:c") would
 	// collide on a naive join, as would ("a%3Ab","c") against an escaped ("a:b","c").
 	pairs := [][2]string{
-		{"a:b", "c"}, {"a", "b:c"},
-		{"a%3Ab", "c"}, {"a:b", "c"},
-		{"", "x"}, {"x", ""},
-		{"%", ":"}, {":", "%"},
-		{"a%", "b"}, {"a", "%b"},
+		{"a:b", "c"},
+		{"a", "b:c"},
+		{"a%3Ab", "c"},
+		{"a:b", "c"},
+		{"", "x"},
+		{"x", ""},
+		{"%", ":"},
+		{":", "%"},
+		{"a%", "b"},
+		{"a", "%b"},
 	}
 	seen := map[string][2]string{}
 	for _, p := range pairs {
