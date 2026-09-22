@@ -5,7 +5,7 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 home: https://github.com/Abhishek-Mallick/cachet
-icon: https://raw.githubusercontent.com/Abhishek-Mallick/cachet/main/.github/assets/cachet-logo.png
+icon: https://raw.githubusercontent.com/Abhishek-Mallick/cachet/main/.github/assets/cachet.png
 sources:
   - https://github.com/Abhishek-Mallick/cachet
 maintainers:

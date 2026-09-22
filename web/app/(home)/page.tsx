@@ -9,23 +9,13 @@ export default function HomePage() {
         {/* One asset per theme, swapped by CSS rather than JavaScript so the correct lockup is in
             the server-rendered HTML. See components/logo.tsx. */}
         <Image
-          src="/cachet-logo-on-light.png"
+          src="/cachet.png"
           alt="Cachet"
           width={420}
           height={140}
           priority
-          className="h-16 w-auto dark:hidden"
+          className="h-16 w-auto dark:invert-0 invert"
         />
-        <Image
-          src="/cachet-logo.png"
-          alt=""
-          aria-hidden
-          width={420}
-          height={140}
-          priority
-          className="hidden h-16 w-auto dark:block"
-        />
-
         <h1 className="mt-10 max-w-3xl text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
           A read cache that proves its own correctness
         </h1>
@@ -63,7 +53,7 @@ export default function HomePage() {
       </section>
 
       {/* The question everyone asks first */}
-      <section className="mx-auto w-full max-w-4xl px-6 pb-16">
+      <section className="mx-auto w-full max-w-5xl px-6 pb-16">
         <div className="rounded-xl border border-fd-border bg-fd-card p-6">
           <h2 className="text-sm font-semibold tracking-wide text-fd-muted-foreground uppercase">
             What you actually run
