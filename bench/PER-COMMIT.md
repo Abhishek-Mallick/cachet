@@ -21,6 +21,7 @@
 
 | Commit | Date | ControllerConcurrent<br/><sub>ns/op · allocs/op</sub> | RingLookup<br/><sub>ns/op · allocs/op</sub> | SketchCounts<br/><sub>ns/op · allocs/op</sub> | TokenAdvance<br/><sub>ns/op · allocs/op</sub> | TokenProto<br/><sub>ns/op · allocs/op</sub> | Trend<br/><sub>ns/op vs previous</sub> |
 |---|---|---|---|---|---|---|---|
+| `deba075` | 2026-09-23 | 1.21µs · 3 | 25.8ns · 0 | 168.7ns · 0 | 36.5ns · 0 | 400.3ns · 2 | ▲▲ +34% |
 | `6dd4901` | 2026-09-21 | 824.6ns · 3 | 18.7ns · 0 | 135.6ns · 0 | 29.6ns · 0 | 286.7ns · 2 | ▽▽ -27% |
 | `0b818ba` | 2026-09-20 | 1.23µs · 3 | 25.9ns · 0 | 167.4ns · 0 | 36.5ns · 0 | 444.2ns · 2 | ▬ -0% |
 | `83fc271` | 2026-09-20 | 1.24µs · 3 | 25.8ns · 0 | 175.5ns · 0 | 36.4ns · 0 | 431.2ns · 2 | ▬ +1% |
@@ -36,14 +37,9 @@ so the shapes show movement and cannot be compared BETWEEN benchmarks. Read them
 direction; read the table for values.
 
 ```
-ControllerConcurrent  ▇▂▁██▇▁  1.20µs → 824.6ns  (-31%)
-RingLookup            ▂█▁▂▂▂▁  24.0ns → 18.7ns  (-22%)
-SketchCounts          █▃▁▆▇▆▁  178.3ns → 135.6ns  (-24%)
-TokenAdvance          ▆█▁▅▅▅▁  38.3ns → 29.6ns  (-23%)
-TokenProto            ▄▁▁▇▇█▁  374.2ns → 286.7ns  (-23%)
+ControllerConcurrent  ▇▂▁██▇▁▇  1.20µs → 1.21µs  (+1%)
+RingLookup            ▂█▁▂▂▂▁▂  24.0ns → 25.8ns  (+8%)
+SketchCounts          █▃▁▆▇▆▁▆  178.3ns → 168.7ns  (-5%)
+TokenAdvance          ▆█▁▅▅▅▁▅  38.3ns → 36.5ns  (-5%)
+TokenProto            ▄▁▁▇▇█▁▆  374.2ns → 400.3ns  (+7%)
 ```
-
-Every benchmark above moved the same way by a similar amount, and no allocation count
-changed. That is usually the MACHINE rather than the code: unrelated code paths do not
-get uniformly faster together, and a change that made them faster would almost always
-show up in allocations too.
