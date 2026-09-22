@@ -25,8 +25,7 @@ There are two files, and the difference is only the wordmark:
 
 | File | Wordmark | Used on |
 |---|---|---|
-| `public/cachet-logo.png` | White | Dark backgrounds |
-| `public/cachet-logo-on-light.png` | Near-black | Light backgrounds |
+| `public/cachet.png` | White | Dark backgrounds |
 
 Every pixel of the mark — the teal gradient — is identical in both, because it reads on either
 ground. The
