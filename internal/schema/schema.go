@@ -24,6 +24,7 @@ import (
 // reconstruct.
 type Type string
 
+// The supported column types.
 const (
 	Uint8  Type = "uint8"
 	Uint32 Type = "uint32"
