@@ -79,6 +79,30 @@ func canonical(col *Column, v any) (string, error) {
 	}
 }
 
+// KeyOf builds a key for a table from already-ordered primary key values.
+//
+// Descriptor-free, because the CDC tailer knows a table's name and its key columns' positions from
+// the binlog event itself and may be following several tables at once. The grammar is the same one
+// Descriptor.Key uses, which is the requirement: a tailer and an engine must agree on what a row is
+// called, or an invalidation lands under a key nobody reads.
+func KeyOf(table string, values ...any) (Key, error) {
+	if !validIdentifier(table) {
+		return Key{}, fmt.Errorf("schema: %q is not a plain SQL identifier", table)
+	}
+	if len(values) == 0 {
+		return Key{}, fmt.Errorf("schema: key for %q has no values", table)
+	}
+	out := make([]string, len(values))
+	for i, v := range values {
+		s, err := canonical(&Column{Name: "key"}, v)
+		if err != nil {
+			return Key{}, err
+		}
+		out[i] = s
+	}
+	return Key{Table: table, Values: out}, nil
+}
+
 // ParseKey parses a key without needing a descriptor.
 //
 // Deliberately descriptor-free: the CDC tailer and Sextant both recover a primary key from a key

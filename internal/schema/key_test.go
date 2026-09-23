@@ -168,3 +168,51 @@ func TestControlBytesAreEscaped(t *testing.T) {
 		t.Errorf("escaping was not reversible: %q", back.Values[0])
 	}
 }
+
+// The tailer builds keys without a descriptor, from column values it reads out of a binlog event.
+// It must produce exactly what the engine produces from the same row, or an invalidation lands
+// under a key nobody reads — which is silent staleness, and the failure mode with no signal.
+func TestTheTailerAndTheEngineAgreeOnAKey(t *testing.T) {
+	t.Parallel()
+
+	d, err := schema.NewDescriptor(entities())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []uint64{1, 123, 18446744073709551615} {
+		fromEngine, err := d.Key(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fromTailer, err := schema.KeyOf("entities", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fromEngine.String() != fromTailer.String() {
+			t.Errorf("id %d: engine says %q, tailer says %q", id, fromEngine, fromTailer)
+		}
+	}
+
+	// And a string key, where the escaping has to match too.
+	users, err := schema.NewDescriptor(schema.TableConfig{
+		Name: "users", PrimaryKey: []string{"email"}, VersionColumn: "version",
+		Columns: []schema.ColumnConfig{
+			{Name: "email", Type: schema.String, Collation: "utf8mb4_bin"},
+			{Name: "version", Type: schema.Uint64},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, email := range []string{"a@b.com", "weird:value", "100%"} {
+		fromEngine, _ := users.Key(email)
+		fromTailer, err := schema.KeyOf("users", email)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fromEngine.String() != fromTailer.String() {
+			t.Errorf("%q: engine says %q, tailer says %q", email, fromEngine, fromTailer)
+		}
+	}
+}

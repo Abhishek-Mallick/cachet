@@ -2,6 +2,7 @@ package cdc
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 )
@@ -23,7 +24,7 @@ func NewForTest(opts Options) *Tailer {
 }
 
 func (t *Tailer) InvalidateForTest(ctx context.Context, id, version uint64) {
-	t.invalidate(ctx, id, version)
+	t.invalidate(ctx, fmt.Sprintf("%s:%d", t.opts.Table, id), version)
 }
 
 func (t *Tailer) SetPositionForTest(p Position) { t.setPosition(p) }

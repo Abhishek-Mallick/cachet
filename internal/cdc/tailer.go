@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 )
 
 // Invalidator is the subset of the cache the tailer needs.
@@ -34,6 +35,14 @@ type Options struct {
 	Password string
 	Database string
 	Table    string
+
+	// Descriptor declares the table's shape. When set, the primary key columns and the version
+	// column are resolved by name from it and keys are built with the shared grammar — so a table
+	// whose key is not called `id`, or is composite, produces the key the engine would.
+	//
+	// Nil keeps the historical behaviour: columns literally named `id` and `version`. That is what
+	// the fixture uses, and the two agree byte-for-byte on it.
+	Descriptor *schema.Descriptor
 
 	// ServerID is this tailer's replication server id. It must be unique across every replica and
 	// tailer attached to the same MySQL instance, or the two fight over the connection.
@@ -284,9 +293,7 @@ func (t *Tailer) saveIfDirty() {
 // cannot honestly record progress it has not made, and stalling one shard's binlog consumption is a
 // smaller harm than serving a stale row indefinitely. If the budget runs out, the checkpoint is
 // frozen so a restart replays from before the lost event.
-func (t *Tailer) invalidate(ctx context.Context, id, version uint64) {
-	key := t.opts.Table + ":" + strconv.FormatUint(id, 10)
-
+func (t *Tailer) invalidate(ctx context.Context, key string, version uint64) {
 	backoff := initialInvalidateBackoff
 	deadline := time.Now().Add(t.opts.InvalidateRetryFor)
 	for attempt := 1; ; attempt++ {
@@ -336,18 +343,42 @@ type handler struct {
 func (h *handler) OnRow(e *canal.RowsEvent) error {
 	ctx := context.Background()
 
-	idIdx, versionIdx := -1, -1
+	// Which columns name the row, and which carries the version. From the descriptor when one is
+	// declared, so a table whose key is not called `id` works; falling back to the historical
+	// names, which is what the fixture uses and what keeps its keys byte-identical.
+	keyNames, versionName := []string{"id"}, "version"
+	if d := h.tailer.opts.Descriptor; d != nil {
+		keyNames = keyNames[:0]
+		for _, c := range d.PrimaryKey {
+			keyNames = append(keyNames, c.Name)
+		}
+		versionName = d.VersionColumn.Name
+	}
+
+	keyIdx := make([]int, len(keyNames))
+	for i := range keyIdx {
+		keyIdx[i] = -1
+	}
+	versionIdx := -1
 	for i, col := range e.Table.Columns {
-		switch col.Name {
-		case "id":
-			idIdx = i
-		case "version":
+		for j, want := range keyNames {
+			if col.Name == want {
+				keyIdx[j] = i
+			}
+		}
+		if col.Name == versionName {
 			versionIdx = i
 		}
 	}
-	if idIdx < 0 || versionIdx < 0 {
-		return fmt.Errorf("cdc: table %s.%s lacks an id or version column",
-			e.Table.Schema, e.Table.Name)
+	for j, idx := range keyIdx {
+		if idx < 0 {
+			return fmt.Errorf("cdc: table %s.%s lacks the primary key column %q",
+				e.Table.Schema, e.Table.Name, keyNames[j])
+		}
+	}
+	if versionIdx < 0 {
+		return fmt.Errorf("cdc: table %s.%s lacks the version column %q",
+			e.Table.Schema, e.Table.Name, versionName)
 	}
 
 	// UPDATE events carry before/after pairs; only the AFTER image matters, since it holds the new
@@ -361,20 +392,62 @@ func (h *handler) OnRow(e *canal.RowsEvent) error {
 
 	for i := offset; i < len(e.Rows); i += step {
 		row := e.Rows[i]
-		if idIdx >= len(row) || versionIdx >= len(row) {
-			continue
-		}
-		id, ok := toUint64(row[idIdx])
-		if !ok {
+		if versionIdx >= len(row) {
 			continue
 		}
 		version, ok := toUint64(row[versionIdx])
 		if !ok {
 			continue
 		}
-		h.tailer.invalidate(ctx, id, version)
+
+		// The table name comes from the EVENT, not from configuration: one tailer may follow
+		// several tables on a shard, and the key has to name the one that actually changed.
+		key, ok := rowKey(e.Table.Name, keyIdx, row)
+		if !ok {
+			continue
+		}
+		h.tailer.invalidate(ctx, key, version)
 	}
 	return nil
+}
+
+// rowKey builds the cache key naming a changed row.
+//
+// It uses the same grammar the engine uses, so a tailer and an engine agree on what a row is called
+// — which is the whole requirement: an invalidation under a key nobody reads is an invalidation
+// that silently does nothing.
+func rowKey(table string, keyIdx []int, row []any) (string, bool) {
+	values := make([]any, len(keyIdx))
+	for i, idx := range keyIdx {
+		if idx >= len(row) || row[idx] == nil {
+			return "", false
+		}
+		values[i] = binlogValue(row[idx])
+	}
+	k, err := schema.KeyOf(table, values...)
+	if err != nil {
+		return "", false
+	}
+	return k.String(), true
+}
+
+// binlogValue renders one binlog column value as the bytes the key grammar expects.
+//
+// canal produces Go types that vary by column type, and a key built from a fmt of the wrong one
+// would name a row nobody reads. Integers are rendered as plain decimal, matching what the engine
+// derives from the same column.
+func binlogValue(v any) any {
+	switch val := v.(type) {
+	case []byte:
+		return string(val)
+	case string:
+		return val
+	default:
+		if u, ok := toUint64(v); ok {
+			return u
+		}
+		return fmt.Sprint(v)
+	}
 }
 
 // OnPosSynced records progress. The position is only checkpointed periodically, because saving on
