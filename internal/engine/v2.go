@@ -51,7 +51,7 @@ func (v *V2) Handshake(_ context.Context, req *cachetv2.HandshakeRequest) (*cach
 		ServerVersion:   v.e.version,
 		ProtocolVersion: ProtocolVersionV2,
 		Compatible:      true,
-		Tables:          []*cachetv2.TableDescriptor{descriptorToProto(entitiesDescriptor)},
+		Tables:          tablesToProto(v.e.Tables()),
 	}, nil
 }
 
@@ -83,7 +83,7 @@ func (v *V2) Put(ctx context.Context, req *cachetv2.PutRequest) (*cachetv2.PutRe
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	rec, err := rowToRecord(key, req.GetRow())
+	rec, err := rowToRecord(v.e.table(), key, req.GetRow())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -131,7 +131,7 @@ func (v *V2) BatchGet(ctx context.Context, req *cachetv2.BatchGetRequest) (*cach
 
 // UpdateWhere applies a conditional write.
 func (v *V2) UpdateWhere(ctx context.Context, req *cachetv2.UpdateWhereRequest) (*cachetv2.UpdateWhereResponse, error) {
-	v1req, err := updateWhereToV1(req)
+	v1req, err := updateWhereToV1(v.e.table(), req)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +145,14 @@ func (v *V2) UpdateWhere(ctx context.Context, req *cachetv2.UpdateWhereRequest) 
 		AffectedKeys: v1resp.GetAffectedKeys(),
 		Session:      sessionToV2(v1resp.GetSession()),
 	}, nil
+}
+
+func tablesToProto(tables []*schema.Descriptor) []*cachetv2.TableDescriptor {
+	out := make([]*cachetv2.TableDescriptor, 0, len(tables))
+	for _, d := range tables {
+		out = append(out, descriptorToProto(d))
+	}
+	return out
 }
 
 func descriptorToProto(d *schema.Descriptor) *cachetv2.TableDescriptor {

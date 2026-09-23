@@ -9,15 +9,17 @@ import (
 
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
+	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 )
 
 func TestDefaultsAreValid(t *testing.T) {
 	t.Parallel()
 
-	// The defaults have to stand on their own: `cachet` with only shard DSNs supplied must boot.
-	// A default set that cannot pass its own validator is a trap for the first user.
-	cfg := config.Default()
-	cfg.Shards = []config.Shard{{ID: "shard0", DSN: "root:x@tcp(127.0.0.1:3306)/cachet"}}
+	// The defaults have to stand on their own: `cachet` with shard DSNs and a table declaration
+	// supplied must boot. A default set that cannot pass its own validator is a trap for the first
+	// user. The table is NOT defaulted — a built-in table would be a default that is wrong for
+	// everyone but this project's fixtures — so it is the one thing every config must supply.
+	cfg := validCacheConfig()
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Default().Validate(): %v", err)
@@ -140,8 +142,7 @@ func TestConsistencySettingsMustBePositive(t *testing.T) {
 func TestDefaultLevelIsParsedAndValidated(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Default()
-	cfg.Shards = []config.Shard{{ID: "shard0", DSN: "x"}}
+	cfg := validCacheConfig()
 	cfg.DefaultLevel = "stronk"
 
 	if err := cfg.Validate(); err == nil {
@@ -172,7 +173,7 @@ shards:
 consistency:
   max_clock_skew: 500ms
   entry_ttl: 2h
-`)
+`+strings.Replace(fixtureTableYAML, "shards: [shard0]", "shards: [shard0, shard1]", 1))
 
 	cfg, err := config.Load(path, nil)
 	if err != nil {
@@ -203,7 +204,7 @@ shards:
     dsn: from-file
 consistency:
   max_clock_skew: 100ms
-`)
+`+fixtureTableYAML)
 
 	cfg, err := config.Load(path, map[string]string{
 		"CACHET_CONSISTENCY__MAX_CLOCK_SKEW": "750ms",
@@ -296,8 +297,33 @@ func TestBootLogRendersDurationsReadably(t *testing.T) {
 func validCacheConfig() config.Config {
 	cfg := config.Default()
 	cfg.Shards = []config.Shard{{ID: "shard0", DSN: "root:x@tcp(127.0.0.1:3306)/cachet"}}
-	return cfg
+	return withFixtureTable(cfg)
 }
+
+// withFixtureTable declares the project's own fixture table on a config.
+//
+// Cachet has no built-in table, so nothing validates without a declaration — which is the point of
+// the change that introduced this helper. Tests about cache addresses or consistency settings have
+// no opinion about the table, and this is what keeps them from acquiring one.
+func withFixtureTable(cfg config.Config) config.Config { return table.Declare(cfg) }
+
+// fixtureTableYAML is the same declaration as a file fragment, for the tests that go through Load.
+const fixtureTableYAML = `
+topologies:
+  - name: main
+    shards: [shard0]
+tables:
+  - name: entities
+    topology: main
+    primary_key: [id]
+    version_column: version
+    columns:
+      - {name: id, type: uint64}
+      - {name: tenant_id, type: uint32}
+      - {name: status, type: uint8}
+      - {name: payload, type: bytes}
+      - {name: version, type: uint64}
+`
 
 func TestEmptyCacheAddressIsRejected(t *testing.T) {
 	t.Parallel()

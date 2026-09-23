@@ -27,11 +27,11 @@ import (
 // This is the v1 SHIM, and the reason it can be this strict: v1 can only describe a table shaped
 // like the fixture, so a v2 row that is not that shape has no v1 representation. Refusing with the
 // reason named beats inventing columns, which would be a wrong answer dressed as a working one.
-func rowToRecord(key schema.Key, row *cachetv2.Row) (*cachetv1.Record, error) {
+func rowToRecord(d *schema.Descriptor, key schema.Key, row *cachetv2.Row) (*cachetv1.Record, error) {
 	values := row.GetValues()
-	if len(values) != len(entitiesDescriptor.Columns) {
+	if len(values) != len(d.Columns) {
 		return nil, fmt.Errorf("row has %d values, this engine's table has %d columns",
-			len(values), len(entitiesDescriptor.Columns))
+			len(values), len(d.Columns))
 	}
 	if len(key.Values) != 1 {
 		return nil, fmt.Errorf("key %s is composite; this engine's table has a single-column primary key", key)
@@ -49,7 +49,7 @@ func rowToRecord(key schema.Key, row *cachetv2.Row) (*cachetv1.Record, error) {
 	// Encoding and decoding rather than reading positions directly: it runs the row through the
 	// same validation a cached row gets, so a NULL in a NOT NULL column is refused here rather
 	// than written to the database and refused on the way back out.
-	encoded, err := entitiesDescriptor.EncodeRow(decoded)
+	encoded, err := d.EncodeRow(decoded)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func rowToRecord(key schema.Key, row *cachetv2.Row) (*cachetv1.Record, error) {
 	// The key and the row's primary-key column have to agree. They arrive as separate fields, so a
 	// client that built one from a stale copy of the other would have the engine write a record
 	// under a key that does not name it — a row findable only by a key nobody would construct.
-	want, err := entitiesDescriptor.Key(rec.ID)
+	want, err := d.Key(rec.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,13 +126,13 @@ func deleteRequestToV1(req *cachetv2.DeleteRequest) *cachetv1.DeleteRequest {
 // v1's predicate is tenant_id AND status → status, which is the fixture's conditional write and
 // nothing else. A predicate naming other columns is refused with the columns listed, because
 // silently matching on the nearest available column would change which rows a write touched.
-func updateWhereToV1(req *cachetv2.UpdateWhereRequest) (*cachetv1.UpdateWhereRequest, error) {
+func updateWhereToV1(d *schema.Descriptor, req *cachetv2.UpdateWhereRequest) (*cachetv1.UpdateWhereRequest, error) {
 	// v1's conditional write has no table field because there was only ever one table. v2 names
 	// it, so the name has to be checked here or it would be accepted and ignored — a write the
 	// caller believes landed on one table and that landed on another.
-	if t := req.GetTable(); t != "" && t != entitiesDescriptor.Name {
+	if t := req.GetTable(); t != "" && t != d.Name {
 		return nil, status.Errorf(codes.InvalidArgument,
-			"this engine serves table %q; it cannot write to %q", entitiesDescriptor.Name, t)
+			"this engine serves table %q; it cannot write to %q", d.Name, t)
 	}
 
 	out := &cachetv1.UpdateWhereRequest{Session: sessionToV1(req.GetSession())}

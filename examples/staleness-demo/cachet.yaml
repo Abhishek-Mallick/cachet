@@ -29,3 +29,42 @@ consistency:
 
 observability:
   metrics_listen: "127.0.0.1:9095"
+
+# ─── Added by `cachetctl config migrate` ────────────────────────────────────────────
+#
+# Cachet no longer has a built-in table. This is the declaration it used to compile in, written
+# down: the same five columns in the same order, so the row fingerprint is unchanged and every
+# cache entry you already have still reads as a hit.
+#
+# A topology is a named set of shards. Tables name one rather than listing shards, because routing
+# comes from the key and the key is namespaced by table — two tables are only safely read together
+# if they are sharded the same way.
+topologies:
+  - name: main
+    shards: [shard0]
+
+tables:
+  - name: entities
+    topology: main
+    primary_key: [id]
+
+    # Maintained by Cachet on every write, never by your application. It is what every cache
+    # compare-and-set is performed against.
+    version_column: version
+
+    # Order is not cosmetic: a column's position is part of the row encoding and of the
+    # fingerprint. Reordering these invalidates every entry rather than decoding old bytes into
+    # new columns.
+    columns:
+      - {name: id, type: uint64}
+      - {name: tenant_id, type: uint32}
+      - {name: status, type: uint8}
+      - {name: payload, type: bytes}
+      - {name: version, type: uint64}
+
+    # The conditional-write shapes this deployment permits. Declared rather than taken from a
+    # request, and each match set is checked against the table's indexes at boot — an unindexed
+    # match takes gap locks inside the transaction that is about to write.
+    predicates:
+      - match: [tenant_id, status]
+        set: [status]

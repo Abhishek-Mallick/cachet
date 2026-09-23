@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strconv"
 	"sync"
 
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 )
 
@@ -87,10 +89,22 @@ func (a *OriginAdapter) Shard(key string) (string, error) {
 	return string(id), nil
 }
 
-// parseKeyID extracts the numeric id from "entities:<id>".
+// parseKeyID extracts the numeric primary key from "<table>:<id>".
+//
+// The table name is not checked here because Sextant is handed keys, never asked to invent them:
+// they come from the binlog of the table it was configured to follow. What matters is the key
+// grammar, which is shared with the engine and the tailer — parsing it a second way here is how a
+// verifier ends up checking a row nobody wrote.
 func parseKeyID(key string) (uint64, error) {
-	var id uint64
-	if _, err := fmt.Sscanf(key, "entities:%d", &id); err != nil {
+	parsed, err := schema.ParseKey(key)
+	if err != nil {
+		return 0, fmt.Errorf("sextant: parse key %q: %w", key, err)
+	}
+	if len(parsed.Values) != 1 {
+		return 0, fmt.Errorf("sextant: key %q is composite; this adapter reads a single-column key", key)
+	}
+	id, err := strconv.ParseUint(parsed.Values[0], 10, 64)
+	if err != nil {
 		return 0, fmt.Errorf("sextant: parse key %q: %w", key, err)
 	}
 	return id, nil

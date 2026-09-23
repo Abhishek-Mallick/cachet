@@ -74,6 +74,17 @@ rather than surfacing on the first user request.
 ./bin/cachet -version
 ```
 
+**Upgrading from a config without `tables:`?** Cachet used to have one table compiled in. Write it
+down mechanically — comments and all your own settings are preserved:
+
+```bash
+cachetctl config migrate -config cachet.yaml        # prints the result
+cachetctl config migrate -config cachet.yaml -w     # rewrites the file
+```
+
+The declaration it writes is the shape Cachet already had, so the row fingerprint is unchanged and
+every cache entry you already hold still reads as a hit.
+
 ```yaml
 # Listen on TCP and a Unix socket simultaneously. The sidecar topology is the default,
 # so both transports are first-class from the first release (ADR 0004).
@@ -85,6 +96,44 @@ shards:
   - { id: shard0, dsn: "user:pass@tcp(127.0.0.1:3306)/cachet" }
   - { id: shard1, dsn: "user:pass@tcp(127.0.0.1:3307)/cachet" }
   - { id: shard2, dsn: "user:pass@tcp(127.0.0.1:3308)/cachet" }
+
+# What Cachet caches. Required: there is no built-in table, because the cacheable set is an
+# operator's decision with consistency consequences, and a system that chose it for you would be
+# choosing which rows get a weaker guarantee (ADR 0005).
+#
+# A topology is a named set of shards. Tables name one rather than listing shards, because routing
+# comes from the key and the key is namespaced by table — two tables are only safely read together
+# if they are sharded the same way.
+topologies:
+  - name: main
+    shards: [shard0, shard1, shard2]
+
+tables:
+  - name: entities
+    topology: main
+    primary_key: [id]
+
+    # Maintained by Cachet on every write, never by your application. Every cache
+    # compare-and-set is performed against it.
+    version_column: version
+
+    # Order is not cosmetic: a column's position is part of the row encoding and of the row
+    # fingerprint. Reordering these makes every existing entry read as a miss rather than
+    # decoding old bytes into new columns.
+    columns:
+      - { name: id, type: uint64 }
+      - { name: tenant_id, type: uint32 }
+      - { name: status, type: uint8 }
+      - { name: payload, type: bytes }
+      - { name: version, type: uint64 }
+
+    # The conditional-write shapes this deployment permits — declared, never taken from a
+    # request. Each match set is checked against the table's indexes at boot, because
+    # `SELECT … FOR UPDATE` on an unindexed column takes gap locks inside the transaction that
+    # is about to write. That is an outage, not a slow query.
+    predicates:
+      - match: [tenant_id, status]
+        set: [status]
 
 cache:
   # Cache NODES, routed by their own ring — independent of the shards above. Losing one
@@ -327,8 +376,8 @@ insert invalidates that negative entry.
 
 ## Operating it — `cachetctl`
 
-The control plane. Five commands, each answering a question you ask during an incident. Every one
-takes `-config <path>` and `-json`.
+The control plane. Each command answers a question you ask during an incident. Every one takes
+`-config <path>` and `-json`.
 
 ```bash
 cachetctl bench quick                     # 30-second smoke benchmark against YOUR database
@@ -338,6 +387,7 @@ cachetctl inspect entities:1              # where does this key live, and what d
 cachetctl invalidate entities:1 -dry-run  # preview the blast radius
 cachetctl invalidate entities:1           # the escape hatch
 cachetctl checkpoint -state-dir ./.flux   # how far has each shard's tailer got?
+cachetctl config migrate -config c.yaml   # write down the table Cachet used to compile in
 ```
 
 `inspect` is the one you will reach for most:

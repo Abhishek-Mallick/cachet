@@ -9,7 +9,7 @@ import (
 func TestKeyRoundTrips(t *testing.T) {
 	t.Parallel()
 
-	k, err := engine.ParseKey("entities:42")
+	k, err := engine.ParseKey("entities", "entities:42")
 	if err != nil {
 		t.Fatalf("ParseKey: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestMalformedKeysAreRejected(t *testing.T) {
 		"entities:42:extra",
 		"other:42",
 	} {
-		if _, err := engine.ParseKey(in); err == nil {
+		if _, err := engine.ParseKey("entities", in); err == nil {
 			t.Errorf("ParseKey(%q) succeeded; want an error", in)
 		}
 	}
@@ -46,7 +46,7 @@ func TestMalformedKeysAreRejected(t *testing.T) {
 func TestKeyRejectsAnOverflowingID(t *testing.T) {
 	t.Parallel()
 
-	if _, err := engine.ParseKey("entities:99999999999999999999999"); err == nil {
+	if _, err := engine.ParseKey("entities", "entities:99999999999999999999999"); err == nil {
 		t.Error("ParseKey accepted an id that does not fit a uint64")
 	}
 }

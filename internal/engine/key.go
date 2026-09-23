@@ -6,13 +6,6 @@ import (
 	"strings"
 )
 
-// entitiesTable is the only table Cachet serves in Phase 0.
-//
-// Restricting it is deliberate rather than a shortcut: routing and cache identity are both derived
-// from the key, so accepting an unknown table would mean caching rows under an identity that no
-// invalidation path knows how to produce.
-const entitiesTable = "entities"
-
 // Key identifies one cacheable row.
 //
 // It is the unit of routing AND of cache identity, which is why parsing is strict. A key the engine
@@ -24,13 +17,19 @@ type Key struct {
 	ID    uint64
 }
 
-// ParseKey parses a key of the form "<table>:<id>".
-func ParseKey(s string) (Key, error) {
+// ParseKey parses a key of the form "<table>:<id>" belonging to a named table.
+//
+// The table is a parameter rather than a constant because Cachet no longer has a built-in table:
+// what it serves is declared. Restricting the key to that one table is still deliberate rather
+// than a shortcut — routing and cache identity are both derived from the key, so accepting an
+// undeclared table would mean caching rows under an identity that no invalidation path knows how
+// to produce.
+func ParseKey(cachedTable, s string) (Key, error) {
 	table, rawID, ok := strings.Cut(s, ":")
 	if !ok {
 		return Key{}, fmt.Errorf("engine: key %q must be <table>:<id>", s)
 	}
-	if table != entitiesTable {
+	if table != cachedTable {
 		return Key{}, fmt.Errorf("engine: unknown table %q in key %q", table, s)
 	}
 	if rawID == "" {

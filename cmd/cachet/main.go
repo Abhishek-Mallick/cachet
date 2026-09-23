@@ -86,6 +86,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The declared tables. Everything downstream — the cache entry fingerprint, the engine's key
+	// parsing, the tailer's column resolution — comes from these rather than from a name compiled
+	// into the binary.
+	descriptors, err := cfg.Descriptors()
+	if err != nil {
+		return err
+	}
+
 	shards, router, err := openShards(ctx, cfg, log)
 	if err != nil {
 		return err
@@ -97,7 +105,7 @@ func run() error {
 	var cacheClient engine.Cache
 	if len(cfg.Cache.Addresses) > 0 {
 		cc, err := cache.New(ctx, cache.Options{
-			Fingerprint: engine.Fingerprint(),
+			Fingerprint: descriptors[0].Fingerprint,
 			Addresses:   cfg.Cache.Addresses,
 			TTL:         cfg.Consistency.EntryTTL,
 			LeaseTTL:    cfg.Cache.Lease.TTL,
@@ -120,6 +128,7 @@ func run() error {
 	eng, err := engine.New(engine.Options{
 		Router:           router,
 		Shards:           shards,
+		Tables:           descriptors,
 		Cache:            cacheClient,
 		MaxSessionShards: cfg.Consistency.MaxSessionShards,
 		MaxAffectedKeys:  cfg.Consistency.MaxAffectedKeys,

@@ -53,7 +53,7 @@ func run() error {
 		upstreamDB   = flag.String("upstream-db", "cachet", "database to connect to upstream")
 		user         = flag.String("user", "cachet", "username clients present to the PROXY")
 		password     = flag.String("password", "", "password clients present to the proxy")
-		table        = flag.String("table", "entities", "the cached table")
+		table        = flag.String("table", "", "which declared table to cache (defaults to the only one)")
 		opaque       = flag.String("opaque-writes", "refuse", "what to do with writes that cannot be resolved to rows: refuse|forward")
 		printVersion = flag.Bool("version", false, "print the version and exit")
 	)
@@ -122,6 +122,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The declared tables. Everything downstream — the cache entry fingerprint, the engine's key
+	// parsing, the tailer's column resolution — comes from these rather than from a name compiled
+	// into the binary.
+	descriptors, err := cfg.Descriptors()
+	if err != nil {
+		return err
+	}
+
 	shard, err := storage.OpenShard(ctx, storage.ShardID(cfg.Shards[0].ID), cfg.Shards[0].DSN,
 		storage.NewClock(time.Now))
 	if err != nil {
@@ -138,7 +146,7 @@ func run() error {
 		return errors.New("cachet-proxy: no cache configured; without one this is a slower MySQL")
 	}
 	cc, err := cache.New(ctx, cache.Options{
-		Fingerprint: engine.Fingerprint(),
+		Fingerprint: descriptors[0].Fingerprint,
 		Addresses:   cfg.Cache.Addresses,
 		TTL:         cfg.Consistency.EntryTTL,
 		LeaseTTL:    cfg.Cache.Lease.TTL,
@@ -150,6 +158,7 @@ func run() error {
 
 	eng, err := engine.New(engine.Options{
 		Router:                  router,
+		Tables:                  descriptors,
 		Shards:                  map[storage.ShardID]*storage.Shard{storage.ShardID(cfg.Shards[0].ID): shard},
 		Cache:                   cc,
 		MaxSessionShards:        cfg.Consistency.MaxSessionShards,
@@ -169,7 +178,11 @@ func run() error {
 	// accepted. Two things come out of it: the patterns the proxy matches, and whether the declared
 	// columns are the WHOLE row — which is what decides if `SELECT *` can be answered from a cache
 	// entry or must be refused. Both are boot facts rather than per-statement guesses.
-	desc, err := engine.DescriptorFor(*table)
+	name := *table
+	if name == "" {
+		name = descriptors[0].Name
+	}
+	desc, err := eng.Table(name)
 	if err != nil {
 		return err
 	}

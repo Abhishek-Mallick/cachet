@@ -15,6 +15,29 @@ data:
         port: {{ .port | default 3306 }}
         database: {{ .database }}
     {{- end }}
+    topologies:
+    {{- range .Values.topologies }}
+      - name: {{ .name }}
+        shards: [{{ join ", " .shards }}]
+    {{- end }}
+    tables:
+    {{- range .Values.tables }}
+      - name: {{ .name }}
+        topology: {{ .topology }}
+        primary_key: [{{ join ", " .primary_key }}]
+        version_column: {{ .version_column }}
+        columns:
+        {{- range .columns }}
+          - {name: {{ .name }}, type: {{ .type }}{{ if .nullable }}, nullable: true{{ end }}{{ if .collation }}, collation: {{ .collation }}{{ end }}}
+        {{- end }}
+        {{- with .predicates }}
+        predicates:
+        {{- range . }}
+          - match: [{{ join ", " .match }}]
+            set: [{{ join ", " .set }}]
+        {{- end }}
+        {{- end }}
+    {{- end }}
     cache:
       addresses:
       {{- range .Values.cache.addresses }}

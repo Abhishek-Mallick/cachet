@@ -13,10 +13,10 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/Abhishek-Mallick/cachet/internal/config"
-	"github.com/Abhishek-Mallick/cachet/internal/engine"
 	"github.com/Abhishek-Mallick/cachet/internal/proxy"
 	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
+	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
 )
 
@@ -40,10 +40,7 @@ func startProxy(t *testing.T, opaque proxy.OpaqueWritePolicy) (*sql.DB, *harness
 		Shards:                  []config.Shard{{ID: "shard0", DSN: proxyShardDSN}},
 	}, "tcp://127.0.0.1:0")
 
-	desc, err := engine.DescriptorFor("entities")
-	if err != nil {
-		t.Fatalf("DescriptorFor: %v", err)
-	}
+	desc := table.Descriptor()
 	// Whether `SELECT *` is answerable is a boot fact, established against the live table. The
 	// proxy under test gets the same answer the binary computes at startup — see
 	// TestTheProxyProvesWhetherItCanServeSelectStar.
@@ -364,10 +361,7 @@ func undeclaredColumns(t *testing.T, d *schema.Descriptor) []string {
 // derived from the database — if somebody declared `updated_at` tomorrow, this test would change
 // its answer along with the proxy's, instead of both drifting apart.
 func TestTheProxyProvesWhetherItCanServeSelectStar(t *testing.T) {
-	desc, err := engine.DescriptorFor("entities")
-	if err != nil {
-		t.Fatalf("DescriptorFor: %v", err)
-	}
+	desc := table.Descriptor()
 	undeclared := undeclaredColumns(t, desc)
 
 	if len(undeclared) == 0 {

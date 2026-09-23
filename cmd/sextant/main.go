@@ -163,6 +163,15 @@ func run() error {
 
 // tailForCandidates feeds recently-written keys to the verifier, and their mutations to the tracer.
 func tailForCandidates(ctx context.Context, cfg config.Config, keys *sextant.RecentKeys, tracer *sextant.Tracer, log *slog.Logger) {
+	// The declared table, not a compiled-in one. Sextant checks a deployment's own consistency, so
+	// a table name it assumed would make it check a table nobody has.
+	descriptors, err := cfg.Descriptors()
+	if err != nil {
+		log.Warn("sextant: no candidate tailers started", "err", err)
+		return
+	}
+	table := descriptors[0]
+
 	for i, sc := range cfg.Shards {
 		shardCfg := sc
 		// Server ids offset well clear of Flux's, since two replication clients sharing an id fight
@@ -180,7 +189,8 @@ func tailForCandidates(ctx context.Context, cfg config.Config, keys *sextant.Rec
 				User:            user,
 				Password:        password,
 				Database:        database,
-				Table:           "entities",
+				Table:           table.Name,
+				Descriptor:      table,
 				ServerID:        serverID,
 				Cache:           observeOnly{keys: keys, tracer: tracer, shard: shardCfg.ID},
 				Checkpoint:      noCheckpoint{},

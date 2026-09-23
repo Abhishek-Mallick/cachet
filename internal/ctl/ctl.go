@@ -32,7 +32,21 @@ import (
 
 // sampleKey is the key pattern used to estimate ring distribution. It matches the benchmark
 // fixtures, so the shares reported here are the shares the benchmarks actually see.
-func sampleKey(i int) string { return "entities:" + strconv.Itoa(i) }
+// cachedTable is the declared table this tool reasons about.
+//
+// The first declared one: every command here acts on a single key, and until the engine serves
+// several tables there is only one it could belong to. It is read from the config rather than
+// written here, so the tool and the engine cannot disagree about what Cachet caches.
+func cachedTable(cfg config.Config) string {
+	if len(cfg.Tables) == 0 {
+		return ""
+	}
+	return cfg.Tables[0].Name
+}
+
+func sampleKey(cfg config.Config, i int) string {
+	return cachedTable(cfg) + ":" + strconv.Itoa(i)
+}
 
 // RingReport describes both of Cachet's routing rings.
 type RingReport struct {
@@ -90,7 +104,7 @@ func Ring(cfg config.Config, sample int) (RingReport, error) {
 	cacheCounts := make(map[string]int, len(r.CacheNodes))
 	shardCounts := make(map[string]int, len(r.Shards))
 	for i := 0; i < sample; i++ {
-		key := sampleKey(i)
+		key := sampleKey(cfg, i)
 
 		shard, err := shards.ShardFor(key)
 		if err != nil {
@@ -154,7 +168,7 @@ func Locate(cfg config.Config, key string) (KeyLocation, error) {
 	// Parsed with the engine's own parser, so the tool cannot disagree with the engine about what a
 	// key means. A key this tool half-understands would route somewhere deterministic and send an
 	// operator to inspect a node that never held the row.
-	parsed, err := engine.ParseKey(key)
+	parsed, err := engine.ParseKey(cachedTable(cfg), key)
 	if err != nil {
 		return KeyLocation{}, fmt.Errorf("ctl: %w", err)
 	}
@@ -433,8 +447,8 @@ type AdmissionExplanation struct {
 // from a cache that is broken, and "why is this key not cached?" is the first question anyone asks.
 // A control plane that cannot answer it leaves an operator to guess, and they will guess that
 // something is wrong.
-func ExplainAdmission(c *admission.Controller, key string) (AdmissionExplanation, error) {
-	parsed, err := engine.ParseKey(key)
+func ExplainAdmission(cfg config.Config, c *admission.Controller, key string) (AdmissionExplanation, error) {
+	parsed, err := engine.ParseKey(cachedTable(cfg), key)
 	if err != nil {
 		return AdmissionExplanation{}, fmt.Errorf("ctl: %w", err)
 	}

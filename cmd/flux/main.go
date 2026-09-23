@@ -89,6 +89,16 @@ func run() error {
 	var applied, rejected atomic.Int64
 
 	g, gctx := errgroup.WithContext(ctx)
+
+	// The table this tailer follows, declared in config rather than compiled in. The descriptor is
+	// what resolves the primary key and version columns out of a binlog row, so a tailer given the
+	// name alone would fall back to guessing at `id` and `version`.
+	descriptors, err := cfg.Descriptors()
+	if err != nil {
+		return err
+	}
+	table := descriptors[0]
+
 	for i, sc := range cfg.Shards {
 		addr, user, password, database, err := parseDSN(sc.DSN)
 		if err != nil {
@@ -96,12 +106,13 @@ func run() error {
 		}
 
 		tailer, err := cdc.New(cdc.Options{
-			ShardID:  sc.ID,
-			Addr:     addr,
-			User:     user,
-			Password: password,
-			Database: database,
-			Table:    "entities",
+			ShardID:    sc.ID,
+			Addr:       addr,
+			User:       user,
+			Password:   password,
+			Database:   database,
+			Table:      table.Name,
+			Descriptor: table,
 			// Server ids must be unique across every replica and tailer attached to a MySQL
 			// instance. The offset keeps them clear of the shards' own ids, which are 1..N.
 			ServerID:        uint32(1000 + i),

@@ -85,7 +85,7 @@ func (e *Engine) UpdateWhere(ctx context.Context, req *cachetv1.UpdateWhereReque
 			continue
 		}
 		for _, id := range res.AffectedIDs {
-			key := Key{Table: entitiesTable, ID: id}.String()
+			key := Key{Table: e.table().Name, ID: id}.String()
 			// After the commit, before the ack — the same ordering Put relies on, and what lets a
 			// different session see the change immediately.
 			e.invalidate(ctx, key, res.Version)

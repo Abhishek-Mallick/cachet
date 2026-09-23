@@ -41,6 +41,7 @@ commands:
   checkpoint                 each shard's durable CDC tailer position
   admission explain <key>    why a key is or is not being cached
   bench quick                a 30-second smoke benchmark against a live cluster
+  config migrate             add the table declaration Cachet used to compile in
 
 every command accepts -config <path> and -json.
 `
@@ -73,6 +74,8 @@ func run(args []string) error {
 		return admissionCmd(args[1:])
 	case "bench":
 		return benchCmd(args[1:])
+	case "config":
+		return configCmd(args[1:])
 	case "-version", "--version", "version":
 		fmt.Println("cachetctl", version)
 		return nil
@@ -332,6 +335,55 @@ func checkpointCmd(args []string) error {
 	return emit(report, *asJSON)
 }
 
+// configCmd holds the commands that act on a config FILE rather than on a running cluster, which
+// is why it does not use load(): a file that needs migrating is by definition one that no longer
+// validates, so loading it first would refuse to do the thing that fixes it.
+func configCmd(args []string) error {
+	if len(args) == 0 || args[0] != "migrate" {
+		return errors.New("usage: cachetctl config migrate -config <path> [-w]")
+	}
+
+	fs := flag.NewFlagSet("config migrate", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to the Cachet YAML config file")
+	inPlace := fs.Bool("w", false, "rewrite the file instead of printing the result")
+	if _, err := parseArgs(fs, args[1:]); err != nil {
+		return err
+	}
+	if *configPath == "" {
+		return errors.New("cachetctl config migrate: -config <path> is required")
+	}
+
+	src, err := os.ReadFile(*configPath)
+	if err != nil {
+		return fmt.Errorf("cachetctl: read %s: %w", *configPath, err)
+	}
+
+	migrated, err := config.Migrate(src)
+	if err != nil {
+		return err
+	}
+
+	// The default is stdout. Rewriting a production config file is not something to do because a
+	// flag was forgotten, and a diff is what an operator wants to see before it happens.
+	if !*inPlace {
+		_, err := os.Stdout.Write(migrated)
+		return err
+	}
+
+	// Written back to the path that was just read, keeping its mode. The linter flags any write to
+	// a path derived from a flag; here the flag IS the subject of the command, and refusing to
+	// write to the file the operator named would make -w meaningless.
+	info, err := os.Stat(*configPath)
+	if err != nil {
+		return fmt.Errorf("cachetctl: stat %s: %w", *configPath, err)
+	}
+	if err := os.WriteFile(*configPath, migrated, info.Mode().Perm()); err != nil { //nolint:gosec // G703: the path is the command's argument
+		return fmt.Errorf("cachetctl: write %s: %w", *configPath, err)
+	}
+	fmt.Fprintf(os.Stderr, "cachetctl: declared table `entities` in %s\n", *configPath)
+	return nil
+}
+
 func admissionCmd(args []string) error {
 	if len(args) == 0 || args[0] != "explain" {
 		return errors.New("usage: cachetctl admission explain <key>")
@@ -369,7 +421,7 @@ func admissionCmd(args []string) error {
 		}),
 	})
 
-	report, err := ctl.ExplainAdmission(ctrl, rest[0])
+	report, err := ctl.ExplainAdmission(cfg, ctrl, rest[0])
 	if err != nil {
 		return err
 	}

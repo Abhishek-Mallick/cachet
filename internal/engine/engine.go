@@ -15,6 +15,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/obs"
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
 )
@@ -55,6 +56,13 @@ type Options struct {
 	Router *storage.Router
 	// Shards holds an open connection per shard id in Router.
 	Shards map[storage.ShardID]*storage.Shard
+
+	// Tables are the declared tables this engine serves, in declaration order.
+	//
+	// Required, and with no default. A built-in table would be a default that is wrong for
+	// everyone but this project's own fixtures, and the cacheable set is an operator's decision
+	// with consistency consequences (ADR 0005).
+	Tables []*schema.Descriptor
 
 	// Cache is optional. A nil cache is the Phase 0 configuration: every read goes to the database,
 	// which is the baseline every later row in the benchmark table is compared against.
@@ -113,8 +121,14 @@ type Options struct {
 type Engine struct {
 	cachetv1.UnimplementedCacheServiceServer
 
-	router           *storage.Router
-	shards           map[storage.ShardID]*storage.Shard
+	router *storage.Router
+	shards map[storage.ShardID]*storage.Shard
+
+	// tables is what this engine serves, by name, and tableOrder is the order it was declared in —
+	// which is the order the handshake publishes and an operator reads in a log line.
+	tables     map[string]*schema.Descriptor
+	tableOrder []string
+
 	cache            Cache
 	maxSessionShards int
 	maxAffectedKeys  int
@@ -149,6 +163,11 @@ func New(opts Options) (*Engine, error) {
 		return nil, errors.New("engine: shard connections do not match the routing topology")
 	}
 
+	tables, order, err := declaredTables(opts.Tables)
+	if err != nil {
+		return nil, err
+	}
+
 	maxAffected := opts.MaxAffectedKeys
 	if maxAffected <= 0 {
 		// A zero budget would degrade every conditional write, silently turning exact invalidation
@@ -178,6 +197,8 @@ func New(opts Options) (*Engine, error) {
 	return &Engine{
 		router:           opts.Router,
 		shards:           opts.Shards,
+		tables:           tables,
+		tableOrder:       order,
 		cache:            opts.Cache,
 		maxSessionShards: maxShards,
 		maxAffectedKeys:  maxAffected,
@@ -229,7 +250,7 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	key, err := ParseKey(req.GetKey())
+	key, err := ParseKey(e.table().Name, req.GetKey())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -540,7 +561,7 @@ func (e *Engine) BatchGet(ctx context.Context, req *cachetv1.BatchGetRequest) (*
 
 	parsed := make(map[string]Key, len(req.GetKeys()))
 	for _, raw := range req.GetKeys() {
-		k, err := ParseKey(raw)
+		k, err := ParseKey(e.table().Name, raw)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
@@ -601,7 +622,7 @@ func (e *Engine) BatchGet(ctx context.Context, req *cachetv1.BatchGetRequest) (*
 // forward, and a later read rejects any cache entry filled before this write. Returning it is
 // therefore part of the write's contract, not a convenience.
 func (e *Engine) Put(ctx context.Context, req *cachetv1.PutRequest) (*cachetv1.PutResponse, error) {
-	key, err := ParseKey(req.GetKey())
+	key, err := ParseKey(e.table().Name, req.GetKey())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -640,7 +661,7 @@ func (e *Engine) Put(ctx context.Context, req *cachetv1.PutRequest) (*cachetv1.P
 
 // Delete removes one row.
 func (e *Engine) Delete(ctx context.Context, req *cachetv1.DeleteRequest) (*cachetv1.DeleteResponse, error) {
-	key, err := ParseKey(req.GetKey())
+	key, err := ParseKey(e.table().Name, req.GetKey())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

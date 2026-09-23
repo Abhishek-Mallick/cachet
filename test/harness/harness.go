@@ -30,7 +30,9 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
 	"github.com/Abhishek-Mallick/cachet/internal/obs"
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
+	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 )
 
 // DefaultShards matches test/env/compose.yml.
@@ -157,7 +159,7 @@ func StartCachedWith(ctx context.Context, t *testing.T, opts CacheOptions, liste
 
 	EnsureEnvironment(ctx, t)
 	c, err := cache.New(ctx, cache.Options{
-		Fingerprint: engine.Fingerprint(),
+		Fingerprint: table.Descriptor().Fingerprint,
 		Addresses:   []string{cmp.Or(opts.CacheAddr, DefaultCacheAddr)},
 		TTL:         opts.TTL,
 		LeaseTTL:    opts.LeaseTTL,
@@ -228,6 +230,7 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		Metrics:                 metrics,
 		Router:                  router,
 		Shards:                  shards,
+		Tables:                  []*schema.Descriptor{table.Descriptor()},
 		Cache:                   cacheClient,
 		MaxSessionShards:        64,
 		MaxAffectedKeys:         opts.MaxAffectedKeys,

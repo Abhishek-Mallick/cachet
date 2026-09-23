@@ -15,6 +15,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
 	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/pkg/cachet"
+	fixture "github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
 )
 
@@ -151,8 +152,8 @@ func TestTheV2HandshakePublishesTheTableDescriptor(t *testing.T) {
 	}
 	// The fingerprint is the contract: a client that caches the descriptor must be able to notice
 	// that the server's row shape changed under it.
-	if d.GetFingerprint() != engine.Fingerprint() {
-		t.Errorf("published fingerprint = %q, want %q", d.GetFingerprint(), engine.Fingerprint())
+	if d.GetFingerprint() != fixture.Descriptor().Fingerprint {
+		t.Errorf("published fingerprint = %q, want %q", d.GetFingerprint(), fixture.Descriptor().Fingerprint)
 	}
 	if got, want := len(d.GetColumns()), 5; got != want {
 		t.Fatalf("descriptor has %d columns, want %d", got, want)
@@ -422,8 +423,8 @@ func TestTheSDKLearnsTheTableFromTheHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Table: %v", err)
 	}
-	if table.Fingerprint != engine.Fingerprint() {
-		t.Errorf("fingerprint = %q, want %q", table.Fingerprint, engine.Fingerprint())
+	if table.Fingerprint != fixture.Descriptor().Fingerprint {
+		t.Errorf("fingerprint = %q, want %q", table.Fingerprint, fixture.Descriptor().Fingerprint)
 	}
 	if i, ok := table.Index("payload"); !ok || i != 3 {
 		t.Errorf("payload index = %d (found %t), want 3", i, ok)

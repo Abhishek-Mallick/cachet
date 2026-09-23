@@ -66,6 +66,33 @@ shards: []
 #    port: 3306
 #    database: app
 
+# What Cachet caches. There is no default and no built-in table: the cacheable set is an operator's
+# decision with consistency consequences, so it is declared rather than discovered.
+#
+# A topology is a named set of shards. Tables name one rather than listing shards, because routing
+# comes from the key and the key is namespaced by table — two tables are only safely read together
+# if they are sharded the same way.
+topologies: []
+#  - name: main
+#    shards: [shard0, shard1]
+
+# Column ORDER is part of the row encoding and of the fingerprint. Reordering these makes every
+# existing cache entry read as a miss rather than decoding old bytes into new columns.
+tables: []
+#  - name: entities
+#    topology: main
+#    primary_key: [id]
+#    version_column: version      # maintained by Cachet, never by your application
+#    columns:
+#      - {name: id, type: uint64}
+#      - {name: tenant_id, type: uint32}
+#      - {name: status, type: uint8}
+#      - {name: payload, type: bytes}
+#      - {name: version, type: uint64}
+#    predicates:
+#      - match: [tenant_id, status]
+#        set: [status]
+
 cache:
   addresses: []
   #  - valkey-0.valkey:6379

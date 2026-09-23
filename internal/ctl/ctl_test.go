@@ -10,6 +10,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/cdc"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/ctl"
+	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 )
 
 func testConfig() config.Config {
@@ -20,7 +21,7 @@ func testConfig() config.Config {
 		{ID: "shard2", DSN: "root:x@tcp(127.0.0.1:3308)/cachet"},
 	}
 	cfg.Cache.Addresses = []string{"10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379"}
-	return cfg
+	return table.Declare(cfg)
 }
 
 func TestRingReportsBothRings(t *testing.T) {

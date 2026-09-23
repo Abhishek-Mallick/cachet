@@ -30,6 +30,12 @@ type Config struct {
 	Shards []Shard `koanf:"shards"`
 	Cache  Cache   `koanf:"cache"`
 
+	// Topologies and Tables declare what Cachet caches and where it lives. Both are required:
+	// there is no built-in table, because a default table is a default that is wrong for everyone
+	// but the project's own fixtures. See tables.go.
+	Topologies []Topology `koanf:"topologies"`
+	Tables     []Table    `koanf:"tables"`
+
 	// DefaultLevel is the consistency level applied when a request does not specify one.
 	DefaultLevel string `koanf:"default_level"`
 
@@ -392,6 +398,10 @@ func (c Config) Validate() error {
 
 	if _, err := consistency.ParseLevel(c.DefaultLevel); err != nil {
 		return fmt.Errorf("config: default_level: %w", err)
+	}
+
+	if err := c.validateTables(); err != nil {
+		return err
 	}
 
 	if err := c.Consistency.validate(); err != nil {

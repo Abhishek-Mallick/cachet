@@ -55,6 +55,15 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 - **Generic rows on the wire, over a protocol the server describes.** The SDK gains `GetRow`,
   `BatchGetRows` and `PutRow` against table descriptors it learns at the handshake, rather than
   against a schema you configure it with a second copy of.
+- **`tables:` and `topologies:` in config — and no built-in table.** What Cachet caches is
+  declared: the table, its columns and their order, the primary key, the version column, and the
+  conditional-write shapes the deployment permits. A topology is a named set of shards, and tables
+  name one rather than listing shards, because routing comes from the key and the key is namespaced
+  by table. Every binary — engine, proxy, `flux`, `sextant` — reads the declaration instead of a
+  name compiled into it.
+- **`cachetctl config migrate`** writes the declaration Cachet used to compile in into an existing
+  config, preserving your comments and settings. The shape is unchanged, so the row fingerprint is
+  unchanged and every cache entry you already hold still reads as a hit.
 - **The wire proxy reads the same declaration.** Its patterns, its column lists, the key it builds
   and the version column it maintains all come from the table descriptor rather than from names
   compiled into it — including composite primary keys, read in either order. It verifies the
