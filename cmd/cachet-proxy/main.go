@@ -165,6 +165,28 @@ func run() error {
 		return err
 	}
 
+	// The cached table's declaration, verified against the database before a single connection is
+	// accepted. Two things come out of it: the patterns the proxy matches, and whether the declared
+	// columns are the WHOLE row — which is what decides if `SELECT *` can be answered from a cache
+	// entry or must be refused. Both are boot facts rather than per-statement guesses.
+	desc, err := engine.DescriptorFor(*table)
+	if err != nil {
+		return err
+	}
+	live, _, err := shard.Introspect(ctx, desc.Name)
+	if err != nil {
+		return err
+	}
+	if err := storage.VerifyAgainstLive(desc, live); err != nil {
+		return err
+	}
+	undeclared := storage.UndeclaredColumns(desc, live)
+	log.Info("cached table verified",
+		"table", desc.Name,
+		"columns", len(desc.Columns),
+		"undeclared", undeclared,
+		"serves_select_star", len(undeclared) == 0)
+
 	srv, err := proxy.New(proxy.Options{
 		Listen:           *listen,
 		UpstreamAddr:     *upstream,
@@ -173,7 +195,8 @@ func run() error {
 		UpstreamDB:       *upstreamDB,
 		User:             *user,
 		Password:         *password,
-		CachedTable:      *table,
+		Table:            desc,
+		WholeTable:       len(undeclared) == 0,
 		Engine:           eng,
 		Cache:            cc,
 		OpaqueWrites:     policy,

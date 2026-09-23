@@ -261,7 +261,7 @@ as a shared service tier over TCP — and your application talks to it through a
 | `cachet-go` | A Go module — `go get github.com/Abhishek-Mallick/cachet/pkg/cachet` |
 | `cachet-proxy` | Speaks the **MySQL wire protocol**, for applications that will not take an SDK |
 
-The SDK is Go today. The contract is gRPC (`cachet.v1`), so any language that can generate a client
+The SDK is Go today. The contract is gRPC (`cachet.v2`), so any language that can generate a client
 can talk to it — but port the session-token handling first, because that is what carries the
 guarantee. [More on that →](./documentation/WHAT-IS-CACHET.md)
 
@@ -277,6 +277,12 @@ the write it resolves and invalidates exactly the row that changed, and maintain
 column your application has never heard of. A write it cannot resolve to specific rows is **refused
 with an error** rather than forwarded, because forwarding it would leave stale entries that no
 invalidation can ever reach.
+
+It reads your table's declaration rather than a shape compiled into it: the statements it
+recognises, the column lists it can answer and the key it builds all come from the same descriptor
+the engine caches against. At startup it compares that declaration against `INFORMATION_SCHEMA`,
+and if the declared columns turn out to be the *whole* row it can answer `SELECT *` from the cache —
+otherwise `*` goes to the database, because a cache entry cannot invent a column it does not hold.
 
 The trade is the session. A bare SQL connection has nowhere to hold a token, so a *connection* is
 the session — read-own-writes within a connection, and nothing stronger across a pool. Applications

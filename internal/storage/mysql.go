@@ -62,6 +62,15 @@ func (s *Shard) WithTable(t *Table) *Shard {
 	return s
 }
 
+// Introspect reads a table's live columns and indexes from this shard.
+//
+// On the shard rather than on a bare *sql.DB so that callers who need the schema at boot — the
+// proxy proving its cached column set is the whole table, a descriptor being verified against the
+// database — do not have to be handed the connection pool to get it.
+func (s *Shard) Introspect(ctx context.Context, table string) ([]LiveColumn, []Index, error) {
+	return Introspect(ctx, s.db, table)
+}
+
 // OpenShard connects to a shard and verifies it is reachable.
 //
 // It fails fast rather than returning a lazily-connecting handle: a shard that is unreachable at

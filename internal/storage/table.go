@@ -259,6 +259,24 @@ func VerifyAgainstLive(d *schema.Descriptor, live []LiveColumn) error {
 		}
 	}
 	// Extra columns in the table are fine and expected — `updated_at` is one. They are simply not
-	// cached, which the proxy already knows how to express by refusing to serve `SELECT *`.
+	// cached, which the proxy expresses by refusing to serve `SELECT *`. UndeclaredColumns is how
+	// it finds out.
 	return nil
+}
+
+// UndeclaredColumns returns the live table's columns that the descriptor does not declare.
+//
+// An empty result is a PROOF, established at boot against INFORMATION_SCHEMA, that a cache entry
+// holds the whole row. That is what lets the proxy answer `SELECT *` instead of refusing it: with
+// an undeclared column present, `*` could only be answered by inventing a value for it.
+//
+// Order follows the live table's, so a message listing them reads the way `DESCRIBE` does.
+func UndeclaredColumns(d *schema.Descriptor, live []LiveColumn) []string {
+	var out []string
+	for _, c := range live {
+		if d.Column(c.Name) == nil {
+			out = append(out, c.Name)
+		}
+	}
+	return out
 }

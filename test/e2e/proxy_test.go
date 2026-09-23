@@ -13,7 +13,10 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/Abhishek-Mallick/cachet/internal/config"
+	"github.com/Abhishek-Mallick/cachet/internal/engine"
 	"github.com/Abhishek-Mallick/cachet/internal/proxy"
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
+	"github.com/Abhishek-Mallick/cachet/internal/storage"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
 )
 
@@ -37,6 +40,15 @@ func startProxy(t *testing.T, opaque proxy.OpaqueWritePolicy) (*sql.DB, *harness
 		Shards:                  []config.Shard{{ID: "shard0", DSN: proxyShardDSN}},
 	}, "tcp://127.0.0.1:0")
 
+	desc, err := engine.DescriptorFor("entities")
+	if err != nil {
+		t.Fatalf("DescriptorFor: %v", err)
+	}
+	// Whether `SELECT *` is answerable is a boot fact, established against the live table. The
+	// proxy under test gets the same answer the binary computes at startup — see
+	// TestTheProxyProvesWhetherItCanServeSelectStar.
+	undeclared := undeclaredColumns(t, desc)
+
 	srv, err := proxy.New(proxy.Options{
 		Listen:           "127.0.0.1:0",
 		UpstreamAddr:     "127.0.0.1:3316",
@@ -45,7 +57,8 @@ func startProxy(t *testing.T, opaque proxy.OpaqueWritePolicy) (*sql.DB, *harness
 		UpstreamDB:       "cachet",
 		User:             "app",
 		Password:         "app-secret",
-		CachedTable:      "entities",
+		Table:            desc,
+		WholeTable:       len(undeclared) == 0,
 		Engine:           cluster.Engine,
 		Cache:            cluster.Cache,
 		OpaqueWrites:     opaque,
@@ -321,4 +334,76 @@ func TestAPreparedReadIsServedFromTheCache(t *testing.T) {
 	if cluster.CacheOpsForTest("get", "hit") == before {
 		t.Error("a prepared point read was not served from the cache")
 	}
+}
+
+// undeclaredColumns asks the live database which of its columns the descriptor does not declare.
+func undeclaredColumns(t *testing.T, d *schema.Descriptor) []string {
+	t.Helper()
+
+	direct, err := sql.Open("mysql", proxyShardDSN)
+	if err != nil {
+		t.Fatalf("open upstream: %v", err)
+	}
+	defer func() { _ = direct.Close() }()
+
+	live, _, err := storage.Introspect(context.Background(), direct, d.Name)
+	if err != nil {
+		t.Fatalf("Introspect: %v", err)
+	}
+	if err := storage.VerifyAgainstLive(d, live); err != nil {
+		t.Fatalf("the shipped descriptor does not match the shipped schema: %v", err)
+	}
+	return storage.UndeclaredColumns(d, live)
+}
+
+// TestTheProxyProvesWhetherItCanServeSelectStar is the boot check itself, run against the real
+// table rather than a hand-written descriptor.
+//
+// `entities` has an `updated_at` column the descriptor does not declare, so a cache entry is not
+// the whole row and `SELECT *` must be refused. The value of asserting it here is that the fact is
+// derived from the database — if somebody declared `updated_at` tomorrow, this test would change
+// its answer along with the proxy's, instead of both drifting apart.
+func TestTheProxyProvesWhetherItCanServeSelectStar(t *testing.T) {
+	desc, err := engine.DescriptorFor("entities")
+	if err != nil {
+		t.Fatalf("DescriptorFor: %v", err)
+	}
+	undeclared := undeclaredColumns(t, desc)
+
+	if len(undeclared) == 0 {
+		t.Skip("every live column is declared; the refusal below has nothing to assert")
+	}
+	if !contains(undeclared, "updated_at") {
+		t.Errorf("undeclared columns = %v, want updated_at among them", undeclared)
+	}
+
+	db, _ := startProxy(t, proxy.RefuseOpaqueWrites)
+	const id = 9_400_020
+	seedRow(t, id, "star")
+
+	// The refusal is invisible from the client's side — the statement is simply forwarded — so the
+	// assertion is that the answer is the DATABASE's, which includes the undeclared column.
+	var updatedAt sql.NullString
+	var gotID, tenant, status, version uint64
+	var payload []byte
+	row := db.QueryRowContext(context.Background(),
+		fmt.Sprintf("SELECT * FROM entities WHERE id = %d", id))
+	if err := row.Scan(&gotID, &tenant, &status, &payload, &version, &updatedAt); err != nil {
+		t.Fatalf("SELECT * through the proxy: %v", err)
+	}
+	if !updatedAt.Valid || updatedAt.String == "" {
+		t.Error("SELECT * came back without the undeclared column, which means it was answered from the cache")
+	}
+	if string(payload) != "star" {
+		t.Errorf("payload = %q, want \"star\"", payload)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

@@ -40,6 +40,19 @@ var entitiesDescriptor = func() *schema.Descriptor {
 // Fingerprint is the row shape this build reads and writes.
 func Fingerprint() string { return entitiesDescriptor.Fingerprint }
 
+// DescriptorFor returns the declared shape of a table this engine serves.
+//
+// Exported because the proxy builds its patterns and its statements from the same declaration the
+// engine caches against. Two declarations for one table would be two things to keep in step, and
+// the failure mode of their drifting is the proxy answering a column list the engine's entries
+// cannot fill.
+func DescriptorFor(table string) (*schema.Descriptor, error) {
+	if table != entitiesDescriptor.Name {
+		return nil, fmt.Errorf("engine: this build serves table %q, not %q", entitiesDescriptor.Name, table)
+	}
+	return entitiesDescriptor, nil
+}
+
 // encodeRecord renders a storage record as an encoded row.
 func encodeRecord(rec storage.Record) ([]byte, error) {
 	return entitiesDescriptor.EncodeRow([]schema.Value{

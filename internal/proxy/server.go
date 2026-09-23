@@ -13,9 +13,10 @@ import (
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/server"
 
-	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
+	cachetv2 "github.com/Abhishek-Mallick/cachet/api/cachet/v2"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 )
 
 // OpaqueWritePolicy decides what happens to a write against the cached table that the classifier
@@ -49,7 +50,15 @@ type Options struct {
 	User     string
 	Password string
 
-	CachedTable string
+	// Table is the declared shape of the cached table. Every pattern this proxy matches and every
+	// statement it builds comes from it, so a deployment caching its own table changes this and
+	// nothing else.
+	Table *schema.Descriptor
+
+	// WholeTable reports that Table declares every column the live table has, which is what makes
+	// `SELECT *` answerable from a cache entry. It is a boot fact the caller establishes against
+	// INFORMATION_SCHEMA — see storage.UndeclaredColumns — not a guess.
+	WholeTable bool
 
 	Engine *engine.Engine
 	Cache  *cache.Client
@@ -64,6 +73,14 @@ type Server struct {
 	log  *slog.Logger
 	ln   net.Listener
 
+	// matcher holds the compiled patterns for the cached table, built once at boot.
+	matcher *Matcher
+
+	// api is the generic-row protocol. The proxy reads rows positionally against the descriptor
+	// rather than through the fixture-shaped v1 record, which is what lets it answer an arbitrary
+	// column list for an arbitrary table.
+	api *engine.V2
+
 	// wire carries the protocol defaults (capabilities, charset, auth plugin) shared by every
 	// connection this proxy accepts.
 	wire *server.Server
@@ -76,7 +93,7 @@ func New(opts Options) (*Server, error) {
 		return nil, errors.New("proxy: no engine")
 	case opts.Cache == nil:
 		return nil, errors.New("proxy: no cache client")
-	case opts.CachedTable == "":
+	case opts.Table == nil:
 		return nil, errors.New("proxy: no cached table")
 	case opts.UpstreamAddr == "":
 		return nil, errors.New("proxy: no upstream address")
@@ -85,12 +102,24 @@ func New(opts Options) (*Server, error) {
 		opts.Logger = slog.Default()
 	}
 
+	matcher, err := NewMatcher(opts.Table, opts.WholeTable)
+	if err != nil {
+		return nil, err
+	}
+
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "tcp", opts.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("proxy: listen %s: %w", opts.Listen, err)
 	}
-	return &Server{opts: opts, log: opts.Logger, ln: ln, wire: server.NewDefaultServer()}, nil
+	return &Server{
+		opts:    opts,
+		log:     opts.Logger,
+		ln:      ln,
+		matcher: matcher,
+		api:     engine.NewV2(opts.Engine),
+		wire:    server.NewDefaultServer(),
+	}, nil
 }
 
 // Addr is where the proxy is listening, useful when Listen asked for port 0.
@@ -156,13 +185,13 @@ type conn struct {
 
 	// session is this connection's watermark, carried between statements exactly as the SDK
 	// carries one for an application.
-	session *cachetv1.SessionToken
+	session *cachetv2.SessionToken
 }
 
 func (c *conn) UseDB(dbName string) error { return c.up.UseDB(dbName) }
 
 func (c *conn) HandleQuery(query string) (*gomysql.Result, error) {
-	plan := Classify(c.srv.opts.CachedTable, query)
+	plan := c.srv.matcher.Classify(query)
 
 	switch {
 	case plan.BeginsTransaction:
@@ -179,10 +208,14 @@ func (c *conn) HandleQuery(query string) (*gomysql.Result, error) {
 		if c.inTx {
 			break
 		}
-		res, served, err := c.cachedRead(plan, false)
+		key, known := c.srv.matcher.Key(plan, nil)
+		if !known {
+			break
+		}
+		res, served, err := c.cachedRead(key, plan, false)
 		if err != nil {
 			c.srv.log.Warn("proxy: cached read failed, falling through to the database",
-				"id", plan.ID, "err", err)
+				"key", key, "err", err)
 			break
 		}
 		if served {
@@ -190,7 +223,11 @@ func (c *conn) HandleQuery(query string) (*gomysql.Result, error) {
 		}
 
 	case PointWrite:
-		return c.pointWrite(query, plan)
+		key, known := c.srv.matcher.Key(plan, nil)
+		if !known {
+			break
+		}
+		return c.pointWrite(query, key)
 
 	case OpaqueWrite:
 		if c.srv.opts.OpaqueWrites == RefuseOpaqueWrites {
@@ -202,7 +239,7 @@ func (c *conn) HandleQuery(query string) (*gomysql.Result, error) {
 				"cachet proxy: refusing a write to %q it cannot resolve to specific rows: %s. "+
 					"Rewrite it as a single-row statement, use the Cachet SDK, or set "+
 					"opaque_writes=forward if this application maintains the version column itself",
-				c.srv.opts.CachedTable, firstWords(query))
+				c.srv.opts.Table.Name, firstWords(query))
 		}
 	}
 
@@ -211,10 +248,15 @@ func (c *conn) HandleQuery(query string) (*gomysql.Result, error) {
 
 // cachedRead answers a point select from Cachet, returning served=false when the caller should ask
 // the database instead.
-func (c *conn) cachedRead(plan Plan, binary bool) (*gomysql.Result, bool, error) {
-	resp, err := c.srv.opts.Engine.Get(c.ctx, &cachetv1.GetRequest{
-		Key:     c.srv.opts.CachedTable + ":" + strconv.FormatUint(plan.ID, 10),
-		Level:   cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_SESSION,
+//
+// The row comes back as positional values against the descriptor, so the column list the caller
+// asked for is resolved by index. There is no per-column switch to keep in step with a schema —
+// the one that used to live here named the fixture's five columns and could not have served
+// anybody else's table.
+func (c *conn) cachedRead(key schema.Key, plan Plan, binary bool) (*gomysql.Result, bool, error) {
+	resp, err := c.srv.api.Get(c.ctx, &cachetv2.GetRequest{
+		Key:     key.String(),
+		Level:   cachetv2.ConsistencyLevel_CONSISTENCY_LEVEL_SESSION,
 		Session: c.session,
 	})
 	if err != nil {
@@ -231,12 +273,21 @@ func (c *conn) cachedRead(plan Plan, binary bool) (*gomysql.Result, bool, error)
 		return gomysql.NewResult(rs), true, nil
 	}
 
+	values := resp.GetRow().GetValues()
+	if len(values) != len(c.srv.opts.Table.Columns) {
+		// Unreachable while the engine and this proxy hold the same descriptor. If they ever stop
+		// agreeing, the database answers rather than the proxy guessing at which column is which.
+		return nil, false, nil
+	}
+
 	row := make([]any, 0, len(plan.Columns))
-	for _, col := range plan.Columns {
-		v, ok := columnValue(plan.ID, resp.GetRecord(), col)
+	for _, name := range plan.Columns {
+		col := c.srv.opts.Table.Column(name)
+		if col == nil {
+			return nil, false, nil
+		}
+		v, ok := columnValue(col, values[col.Index])
 		if !ok {
-			// Unreachable while the classifier and this switch agree on the cacheable set; if they
-			// ever disagree, the database answers rather than the proxy guessing.
 			return nil, false, nil
 		}
 		row = append(row, v)
@@ -256,16 +307,14 @@ func (c *conn) cachedRead(plan Plan, binary bool) (*gomysql.Result, bool, error)
 // write that leaves the version column alone would leave a stale entry that nothing ever clears.
 // Bumping it in the statement itself keeps the discipline the SDK keeps, without asking the
 // application to know about it.
-func (c *conn) pointWrite(query string, plan Plan) (*gomysql.Result, error) {
-	key := c.srv.opts.CachedTable + ":" + strconv.FormatUint(plan.ID, 10)
-
-	rewritten, ok := rewriteWithVersionBump(query)
+func (c *conn) pointWrite(query string, key schema.Key) (*gomysql.Result, error) {
+	rewritten, ok := c.srv.matcher.rewriteWithVersionBump(query)
 	if !ok {
 		return nil, fmt.Errorf("cachet proxy: could not maintain the version column for: %s", firstWords(query))
 	}
 
 	// The version the row will carry after the write. Read before, so a DELETE still has one.
-	before, err := c.rowVersion(plan.ID)
+	before, err := c.rowVersion(key)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +326,7 @@ func (c *conn) pointWrite(query string, plan Plan) (*gomysql.Result, error) {
 
 	// before+1 is what the rewritten statement set, and is strictly newer than any version the
 	// cached entry can hold, so the tombstone cannot lose its compare-and-set.
-	if err := c.invalidate(key, before+1); err != nil {
+	if err := c.invalidate(key.String(), before+1); err != nil {
 		// The write is committed. Reporting an error now would tell the caller their write failed
 		// when it did not; the CDC tailer is the backstop for exactly this.
 		c.srv.log.Warn("proxy: invalidation failed after a committed write; the tailer must catch it",
@@ -286,9 +335,18 @@ func (c *conn) pointWrite(query string, plan Plan) (*gomysql.Result, error) {
 	return res, nil
 }
 
-func (c *conn) rowVersion(id uint64) (uint64, error) {
-	r, err := c.up.Execute(fmt.Sprintf(
-		"SELECT version FROM `%s` WHERE id = %d", c.srv.opts.CachedTable, id))
+// rowVersion reads the version a row holds before a write changes it.
+//
+// The statement is the descriptor's own read-by-primary-key, with the key values bound rather than
+// formatted into the SQL. The previous version formatted an integer id into the text, which was
+// safe only because an id was the one thing this proxy could parse; a string primary key would
+// have made it a concatenation.
+func (c *conn) rowVersion(key schema.Key) (uint64, error) {
+	args := make([]any, len(key.Values))
+	for i, v := range key.Values {
+		args[i] = v
+	}
+	r, err := c.up.Execute(c.srv.matcher.versionStmt, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -325,7 +383,7 @@ type prepared struct {
 // for those rows would lose its compare-and-set. The refusal has to hold here too, or it is
 // bypassed by adding an argument.
 func (c *conn) HandleStmtPrepare(query string) (int, int, any, error) {
-	plan := Classify(c.srv.opts.CachedTable, query)
+	plan := c.srv.matcher.Classify(query)
 
 	upstreamSQL := query
 	switch plan.Kind {
@@ -335,10 +393,10 @@ func (c *conn) HandleStmtPrepare(query string) (int, int, any, error) {
 				"cachet proxy: refusing a write to %q it cannot resolve to specific rows: %s. "+
 					"Rewrite it as a single-row statement, use the Cachet SDK, or set "+
 					"opaque_writes=forward if this application maintains the version column itself",
-				c.srv.opts.CachedTable, firstWords(query))
+				c.srv.opts.Table.Name, firstWords(query))
 		}
 	case PointWrite:
-		rewritten, ok := rewriteWithVersionBump(query)
+		rewritten, ok := c.srv.matcher.rewriteWithVersionBump(query)
 		if !ok {
 			return 0, 0, nil, fmt.Errorf(
 				"cachet proxy: could not maintain the version column for: %s", firstWords(query))
@@ -361,18 +419,16 @@ func (c *conn) HandleStmtExecute(ctx any, _ string, args []any) (*gomysql.Result
 		return nil, errors.New("cachet proxy: unknown prepared statement")
 	}
 
-	id, known := p.plan.boundID(args)
+	key, known := c.srv.matcher.Key(p.plan, args)
 
 	switch {
 	case p.plan.Kind == PointSelect && known && !c.inTx:
-		plan := p.plan
-		plan.ID = id
 		// binary: a prepared statement's rows go back in the binary protocol. Encoding them as
 		// text produces "malformed packet" at the client, which says nothing about the cause.
-		res, served, err := c.cachedRead(plan, true)
+		res, served, err := c.cachedRead(key, p.plan, true)
 		if err != nil {
 			c.srv.log.Warn("proxy: cached read failed, falling through to the database",
-				"id", id, "err", err)
+				"key", key, "err", err)
 			break
 		}
 		if served {
@@ -380,17 +436,15 @@ func (c *conn) HandleStmtExecute(ctx any, _ string, args []any) (*gomysql.Result
 		}
 
 	case p.plan.Kind == PointWrite && known:
-		return c.executePreparedWrite(p, args, id)
+		return c.executePreparedWrite(p, args, key)
 	}
 
 	return p.stmt.Execute(args...)
 }
 
 // executePreparedWrite runs an already-rewritten write and invalidates the row it changed.
-func (c *conn) executePreparedWrite(p *prepared, args []any, id uint64) (*gomysql.Result, error) {
-	key := c.srv.opts.CachedTable + ":" + strconv.FormatUint(id, 10)
-
-	before, err := c.rowVersion(id)
+func (c *conn) executePreparedWrite(p *prepared, args []any, key schema.Key) (*gomysql.Result, error) {
+	before, err := c.rowVersion(key)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +454,7 @@ func (c *conn) executePreparedWrite(p *prepared, args []any, id uint64) (*gomysq
 		return nil, err
 	}
 
-	if err := c.invalidate(key, before+1); err != nil {
+	if err := c.invalidate(key.String(), before+1); err != nil {
 		// The write is committed. Reporting an error now would say the write failed when it did
 		// not; the CDC tailer is the backstop for exactly this.
 		c.srv.log.Warn("proxy: invalidation failed after a committed write; the tailer must catch it",
@@ -422,19 +476,39 @@ func (c *conn) HandleOtherCommand(cmd byte, _ []byte) error {
 		fmt.Sprintf("cachet proxy: command %d is not supported", cmd))
 }
 
-// columnValue maps a cached record onto one column of the table.
-func columnValue(id uint64, rec *cachetv1.Record, col string) (any, bool) {
-	switch col {
-	case "id":
-		return id, true
-	case "tenant_id":
-		return uint64(rec.GetTenantId()), true
-	case "status":
-		return uint64(rec.GetStatus()), true
-	case "payload":
-		return rec.GetPayload(), true
-	case "version":
-		return rec.GetVersion(), true
+// columnValue renders one cached column as the Go value the MySQL wire encoder expects.
+//
+// The type comes from the declaration, so the column the client sees has the same type it would
+// have had from the database. Returning the canonical bytes for everything would be simpler and
+// would change an integer column into a string one on the wire, which a client reading it into an
+// int in the binary protocol would experience as a malformed packet.
+//
+// A NULL becomes an untyped nil, which the encoder sends as SQL NULL.
+func columnValue(col *schema.Column, v *cachetv2.Value) (any, bool) {
+	if v.GetIsNull() {
+		if !col.Nullable {
+			// The entry disagrees with the declaration. The database answers instead.
+			return nil, false
+		}
+		return nil, true
+	}
+
+	text := string(v.GetData())
+	switch col.Type {
+	case schema.Uint8, schema.Uint32, schema.Uint64:
+		u, err := strconv.ParseUint(text, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		return u, true
+	case schema.Int64:
+		i, err := strconv.ParseInt(text, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		return i, true
+	case schema.String, schema.Bytes, schema.Text:
+		return v.GetData(), true
 	default:
 		return nil, false
 	}

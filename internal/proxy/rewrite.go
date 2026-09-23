@@ -3,6 +3,8 @@ package proxy
 import (
 	"regexp"
 	"strings"
+
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 )
 
 // rewriteWithVersionBump adds `version = version + 1` to a single-row UPDATE.
@@ -20,7 +22,8 @@ import (
 //
 // `version + 1` rather than a clock reading: it needs no coordination with the engine's clock and
 // is strictly greater than whatever the cached entry holds, which is all the compare-and-set needs.
-func rewriteWithVersionBump(query string) (string, bool) {
+func (m *Matcher) rewriteWithVersionBump(query string) (string, bool) {
+	col := m.d.VersionColumn
 	q := strings.TrimSpace(query)
 	trimmed := strings.TrimSuffix(q, ";")
 
@@ -41,13 +44,14 @@ func rewriteWithVersionBump(query string) (string, bool) {
 	sets := trimmed[:where]
 	// Already maintained by the application: leave it exactly as written rather than assigning the
 	// column twice.
-	if versionAssignRe.MatchString(sets) {
+	if m.versionAssign.MatchString(sets) {
 		return q, true
 	}
 
 	// Backticked so the splice cannot collide with a column of the same name in a different case
 	// or quoting style.
-	return strings.TrimRight(sets, " \t\n\r") + ", `version` = `version` + 1 " + trimmed[where:], true
+	quoted := col.Quoted()
+	return strings.TrimRight(sets, " \t\n\r") + ", " + quoted + " = " + quoted + " + 1 " + trimmed[where:], true
 }
 
 // topLevelWhere returns the index of the WHERE keyword that belongs to this statement.
@@ -134,7 +138,16 @@ func isIdentByte(b byte) bool {
 }
 
 var (
-	deletePrefixRe  = regexp.MustCompile(`(?i)^delete\s+from\s`)
-	updatePrefixRe  = regexp.MustCompile(`(?i)^update\s`)
-	versionAssignRe = regexp.MustCompile("(?i)(^|[\\s,`])`?version`?\\s*=")
+	deletePrefixRe = regexp.MustCompile(`(?i)^delete\s+from\s`)
+	updatePrefixRe = regexp.MustCompile(`(?i)^update\s`)
 )
+
+// versionAssignPattern matches an assignment to this table's version column.
+//
+// Built from the descriptor rather than compiled once for a column called "version": a deployment
+// whose version column is named something else would otherwise have its own assignment go
+// unnoticed and be written twice.
+func versionAssignPattern(col *schema.Column) *regexp.Regexp {
+	name := regexp.QuoteMeta(strings.ToLower(col.Name))
+	return regexp.MustCompile("(?i)(^|[\\s,`])`?" + name + "`?\\s*=")
+}

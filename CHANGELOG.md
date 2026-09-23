@@ -55,6 +55,11 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 - **Generic rows on the wire, over a protocol the server describes.** The SDK gains `GetRow`,
   `BatchGetRows` and `PutRow` against table descriptors it learns at the handshake, rather than
   against a schema you configure it with a second copy of.
+- **The wire proxy reads the same declaration.** Its patterns, its column lists, the key it builds
+  and the version column it maintains all come from the table descriptor rather than from names
+  compiled into it — including composite primary keys, read in either order. It verifies the
+  declaration against `INFORMATION_SCHEMA` at startup, and where the declared columns prove to be
+  the whole row it can answer `SELECT *` from the cache instead of refusing it.
 - **`cachet.v1` and `cachet.v2` are served at once**, from one engine, until 1.0 — a v1 write is
   visible to a v2 reader and the reverse, and the SDK negotiates the newer protocol and falls back
   to the older one against a server that does not serve it. Client and server upgrade on their own
