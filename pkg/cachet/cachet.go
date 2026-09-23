@@ -22,23 +22,39 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
+	cachetv2 "github.com/Abhishek-Mallick/cachet/api/cachet/v2"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
 )
 
 // protocolVersion is the contract this client was built against.
-const protocolVersion = "cachet.v1"
+//
+// Two of them, for one release. The generic-row protocol is the one this client prefers; the
+// original stays because a server from before the change does not serve the new one, and an SDK
+// upgrade that required a server upgrade first would make the two impossible to roll independently.
+const (
+	protocolVersion   = "cachet.v1"
+	protocolVersionV2 = "cachet.v2"
+)
 
 // Version is the client version reported during the handshake.
 var Version = "dev"
 
 // Client is a connection to Cachet, plus the session it has accumulated.
 type Client struct {
-	conn *grpc.ClientConn
-	api  cachetv1.CacheServiceClient
+	conn  *grpc.ClientConn
+	api   cachetv1.CacheServiceClient
+	apiV2 cachetv2.CacheServiceClient
+
+	// tables is what the v2 handshake published; nil against a v1-only server, which is what the
+	// generic row API reports as ErrNoDescriptors rather than as a nil map read.
+	tables     map[string]*Table
+	tableOrder []string
 
 	defaultLevel consistency.Level
 	maxShards    int
@@ -121,6 +137,7 @@ func Dial(ctx context.Context, target string, opts ...Option) (*Client, error) {
 	c := &Client{
 		conn:         conn,
 		api:          cachetv1.NewCacheServiceClient(conn),
+		apiV2:        cachetv2.NewCacheServiceClient(conn),
 		defaultLevel: o.defaultLevel,
 		maxShards:    o.maxShards,
 		session:      map[string]uint64{},
@@ -135,7 +152,31 @@ func Dial(ctx context.Context, target string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
+// handshake negotiates the newest protocol the server serves.
+//
+// v2 first, then v1 if the server does not implement it. Only codes.Unimplemented is treated as
+// "try the older one": any other failure is a real one, and retrying it on v1 would convert a
+// connection or authorization problem into a silent downgrade to the protocol with no descriptors.
 func (c *Client) handshake(ctx context.Context) error {
+	resp2, err := c.apiV2.Handshake(ctx, &cachetv2.HandshakeRequest{
+		ProtocolVersion: protocolVersionV2,
+		ClientVersion:   Version,
+	})
+	switch {
+	case status.Code(err) == codes.Unimplemented:
+		// A server from before the generic protocol. The typed API still works against it; the
+		// generic one reports ErrNoDescriptors, which names the cause.
+		c.apiV2 = nil
+	case err != nil:
+		return fmt.Errorf("cachet: handshake: %w", err)
+	case !resp2.GetCompatible():
+		return fmt.Errorf("cachet: server %s cannot serve protocol %s: %s",
+			resp2.GetServerVersion(), protocolVersionV2, resp2.GetReason())
+	default:
+		c.adoptDescriptors(resp2.GetTables())
+		return nil
+	}
+
 	resp, err := c.api.Handshake(ctx, &cachetv1.HandshakeRequest{
 		ProtocolVersion: protocolVersion,
 		ClientVersion:   Version,
@@ -148,6 +189,15 @@ func (c *Client) handshake(ctx context.Context) error {
 			resp.GetServerVersion(), protocolVersion, resp.GetIncompatibilityReason())
 	}
 	return nil
+}
+
+func (c *Client) adoptDescriptors(tables []*cachetv2.TableDescriptor) {
+	c.tables = make(map[string]*Table, len(tables))
+	c.tableOrder = make([]string, 0, len(tables))
+	for _, d := range tables {
+		c.tables[d.GetName()] = tableFromProto(d)
+		c.tableOrder = append(c.tableOrder, d.GetName())
+	}
 }
 
 // Close releases the connection.

@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
+	cachetv2 "github.com/Abhishek-Mallick/cachet/api/cachet/v2"
 	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
@@ -304,6 +305,12 @@ func (c *Cluster) OriginReadsForTest() (int, error) {
 func (c *Cluster) Client(t *testing.T, addr net.Addr) cachetv1.CacheServiceClient {
 	t.Helper()
 
+	return cachetv1.NewCacheServiceClient(c.conn(t, addr))
+}
+
+func (c *Cluster) conn(t *testing.T, addr net.Addr) *grpc.ClientConn {
+	t.Helper()
+
 	target := "passthrough:///" + addr.String()
 	if addr.Network() == "unix" {
 		target = "unix://" + addr.String()
@@ -313,7 +320,16 @@ func (c *Cluster) Client(t *testing.T, addr net.Addr) cachetv1.CacheServiceClien
 		t.Fatalf("dial %s: %v", addr, err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return cachetv1.NewCacheServiceClient(conn)
+	return conn
+}
+
+// ClientV2 dials one of the cluster's listeners speaking cachet.v2.
+//
+// Same address, same connection semantics: the point of the v2 rollout is that a caller changes
+// which stub it constructs and nothing else.
+func (c *Cluster) ClientV2(t *testing.T, addr net.Addr) cachetv2.CacheServiceClient {
+	t.Helper()
+	return cachetv2.NewCacheServiceClient(c.conn(t, addr))
 }
 
 // SocketPath returns a Unix socket path short enough to bind.

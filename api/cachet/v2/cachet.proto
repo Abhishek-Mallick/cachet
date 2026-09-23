@@ -1,0 +1,209 @@
+syntax = "proto3";
+
+// Package cachet.v2 is Cachet's wire contract for arbitrary tables.
+//
+// v1 encoded one table's schema into the protocol itself — a Record was id, tenant_id, status,
+// payload and version, which is the fixture Cachet shipped with and nobody else's table. v2 carries
+// a row as an ordered list of values against a descriptor the server publishes at handshake.
+//
+// The CONSISTENCY LEVELS ARE UNCHANGED, and that is the point of the version number. v1 and v2 mean
+// exactly the same thing by STRONG, SESSION, BOUNDED and EVENTUAL; what changed is how a row is
+// described. A change to the meaning of a level would be a change to CONSISTENCY.md and to the
+// major version of the product, not to this file alone.
+//
+// An engine serves v1 and v2 simultaneously for one release. v1 is removed at 1.0.
+package cachet.v2;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/Abhishek-Mallick/cachet/api/cachet/v2;cachetv2";
+
+// ConsistencyLevel selects a per-request guarantee. Defined normatively in CONSISTENCY.md §3.
+//
+// Identical to cachet.v1.ConsistencyLevel, including the numbering, because they are the same
+// guarantees. Renumbering them would imply a change nobody made.
+enum ConsistencyLevel {
+  CONSISTENCY_LEVEL_UNSPECIFIED = 0;
+  CONSISTENCY_LEVEL_STRONG = 1;
+  CONSISTENCY_LEVEL_SESSION = 2;
+  CONSISTENCY_LEVEL_BOUNDED = 3;
+  CONSISTENCY_LEVEL_EVENTUAL = 4;
+}
+
+// Value is one column of one row.
+//
+// is_null is carried explicitly rather than being inferred from empty data, because SQL NULL and a
+// zero-length value are different facts — and both are different again from the row not existing,
+// which GetResponse.found reports. Three absences, all distinct, none collapsible.
+message Value {
+  bool is_null = 1;
+
+  // The bytes MySQL produced, unparsed. Integers are decimal text, DECIMAL and DATETIME are the
+  // text they were stored as. A client that wants a typed value parses it against the column type
+  // the descriptor gives it — which is strictly more information than a pre-parsed field would
+  // carry, and loses nothing on the way.
+  bytes data = 2;
+}
+
+// Row is one row, in the descriptor's column order.
+message Row {
+  repeated Value values = 1;
+}
+
+// ColumnDescriptor describes one cached column.
+message ColumnDescriptor {
+  string name = 1;
+  string type = 2;
+  bool nullable = 3;
+}
+
+// TableDescriptor tells a client how to read a Row.
+//
+// Published at handshake so a client never has to be configured with a copy of the server's schema.
+// Two copies of a schema is two things to drift.
+message TableDescriptor {
+  string name = 1;
+  repeated ColumnDescriptor columns = 2;
+  repeated string primary_key = 3;
+  string version_column = 4;
+
+  // Fingerprint identifies the row SHAPE. A client that cached anything keyed on it can tell that
+  // the server's schema changed without comparing column lists.
+  string fingerprint = 5;
+}
+
+message SessionToken {
+  map<string, uint64> watermarks = 1;
+}
+
+message ReadMeta {
+  ConsistencyLevel level_served = 1;
+  bool degraded = 2;
+  string degraded_reason = 3;
+  bool cache_hit = 4;
+  uint64 row_version = 5;
+  uint64 fill_version = 6;
+}
+
+message WriteMeta {
+  uint64 version = 1;
+  bool degraded = 2;
+  string degraded_reason = 3;
+  google.protobuf.Duration effective_staleness_bound = 4;
+}
+
+message HandshakeRequest {
+  string client_version = 1;
+  string protocol_version = 2;
+}
+
+message HandshakeResponse {
+  string server_version = 1;
+  string protocol_version = 2;
+  bool compatible = 3;
+  string reason = 4;
+
+  // Every table this engine serves. A client reads rows against these.
+  repeated TableDescriptor tables = 5;
+}
+
+message GetRequest {
+  // key is "<table>:<value>[:<value>…]", percent-escaped. The same grammar the CDC tailer and the
+  // operator CLI use, so one string names a row everywhere in the system.
+  string key = 1;
+  ConsistencyLevel level = 2;
+  google.protobuf.Duration staleness_bound = 3;
+  SessionToken session = 4;
+}
+
+message GetResponse {
+  // Absence is a first-class answer rather than an error: "this row does not exist" is a cacheable
+  // fact, and an insert must later invalidate that negative entry.
+  bool found = 1;
+  Row row = 2;
+  ReadMeta meta = 3;
+  SessionToken session = 4;
+}
+
+message BatchGetRequest {
+  repeated string keys = 1;
+  ConsistencyLevel level = 2;
+  google.protobuf.Duration staleness_bound = 3;
+  SessionToken session = 4;
+}
+
+message BatchGetResponse {
+  // Keyed by the request's key strings. Absent keys are omitted rather than returned empty, so a
+  // caller tells "missing" from "present but empty" by map membership.
+  map<string, Row> rows = 1;
+  ReadMeta meta = 2;
+  SessionToken session = 3;
+}
+
+message PutRequest {
+  string key = 1;
+  Row row = 2;
+  SessionToken session = 3;
+}
+
+message PutResponse {
+  WriteMeta meta = 1;
+  SessionToken session = 2;
+}
+
+message DeleteRequest {
+  string key = 1;
+  SessionToken session = 2;
+}
+
+message DeleteResponse {
+  bool existed = 1;
+  WriteMeta meta = 2;
+  SessionToken session = 3;
+}
+
+// Comparison is one equality test in a conditional write's predicate.
+//
+// Equality only, and against a column the server has declared. Anything richer re-creates the
+// problem the architecture exists to escape: a proxy that must understand arbitrary SQL to know
+// what a statement touched.
+message Comparison {
+  string column = 1;
+  Value value = 2;
+}
+
+message Assignment {
+  string column = 1;
+  Value value = 2;
+}
+
+message UpdateWhereRequest {
+  string table = 1;
+  repeated Comparison match = 2;
+  repeated Assignment set = 3;
+  SessionToken session = 4;
+}
+
+message UpdateWhereResponse {
+  WriteMeta meta = 1;
+
+  // matched is the blast radius, reported whether or not the keys were resolved exactly.
+  uint64 matched = 2;
+
+  // affected_keys is exact when meta.degraded is false and EMPTY when it is true — never partial.
+  // A partial list would leave a caller unable to tell which rows still need treating as stale.
+  repeated string affected_keys = 3;
+
+  SessionToken session = 4;
+}
+
+service CacheService {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc BatchGet(BatchGetRequest) returns (BatchGetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  rpc UpdateWhere(UpdateWhereRequest) returns (UpdateWhereResponse);
+}

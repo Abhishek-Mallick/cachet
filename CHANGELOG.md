@@ -36,6 +36,30 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 - Cache ring independent of database sharding, so one dead shard does not darken a third of the
   keyspace.
 
+### Rows of any shape
+
+- **A table's shape is a declaration, not a compiled-in assumption.** Cache entries carry an opaque
+  encoded row plus a fingerprint of that shape, so an entry survives a column being added, renamed,
+  retyped or reordered without a flush, and without a rolling deploy in which two engines disagree
+  about the shape corrupting anything
+  ([ADR 0005](./docs/adr/0005-declared-table-descriptors.md),
+  [ADR 0006](./docs/adr/0006-row-encoding-and-entry-fingerprint.md)).
+- **Storage, keys and the binlog tailer all read the declaration**: statements are built at boot,
+  indexes validated against the live table, and invalidation keys built from the descriptor's own
+  key columns.
+- **Composite and non-integer primary keys.** The key grammar escapes its values, so splitting is
+  unambiguous; a single-integer key still renders exactly as it always did, which leaves existing
+  entries where the hash ring already put them. String key columns under a case- or
+  accent-insensitive collation are refused rather than cached, because MySQL would treat two keys as
+  one and Cachet would not.
+- **Generic rows on the wire, over a protocol the server describes.** The SDK gains `GetRow`,
+  `BatchGetRows` and `PutRow` against table descriptors it learns at the handshake, rather than
+  against a schema you configure it with a second copy of.
+- **`cachet.v1` and `cachet.v2` are served at once**, from one engine, until 1.0 — a v1 write is
+  visible to a v2 reader and the reverse, and the SDK negotiates the newer protocol and falls back
+  to the older one against a server that does not serve it. Client and server upgrade on their own
+  schedules ([ADR 0007](./docs/adr/0007-two-wire-protocols-at-once.md)).
+
 ### Proof
 
 - **Sextant**: consistency tracing, violation detection, and a per-level SLO published as a number.

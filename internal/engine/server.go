@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
+	cachetv2 "github.com/Abhishek-Mallick/cachet/api/cachet/v2"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 )
 
@@ -101,6 +102,16 @@ func NewServer(ctx context.Context, svc cachetv1.CacheServiceServer, opts Server
 
 	s := grpc.NewServer(grpc.ChainUnaryInterceptor(opts.UnaryInterceptors...))
 	cachetv1.RegisterCacheServiceServer(s, svc)
+
+	// Both protocols on every listener, from the one engine.
+	//
+	// v1 and v2 are two spellings of the same state, so the upgrade is a client-side change a
+	// caller makes when it chooses: a v0.1.0 binary and a v2 binary can read each other's writes
+	// while a fleet rolls. Registering v2 only when the service is the real engine keeps the tests
+	// that pass a stub on v1 alone — a stub has no engine to adapt.
+	if e, ok := svc.(*Engine); ok {
+		cachetv2.RegisterCacheServiceServer(s, NewV2(e))
+	}
 
 	return &Server{
 		grpc:         s,

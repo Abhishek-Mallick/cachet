@@ -190,6 +190,45 @@ if got.Meta.Degraded {
 `Dial` performs the protocol handshake, so an incompatible server is a **startup** error rather than
 a confusing failure on whichever request first touches the field that changed.
 
+### Rows, generically
+
+`Record` names the columns of Cachet's own fixture table, which is why it is not the API a table of
+yours would use. The generic API works against a **table descriptor the server publishes at the
+handshake**, so the client never holds its own copy of your schema.
+
+```go
+table, err := c.Table("entities")     // one of c.Tables(), as the server published them
+key, err := table.Key(uint64(1))      // the engine's own key grammar; composite keys supported
+
+row, err := cachet.NewRow(table,
+    cachet.UintValue(1),              // id
+    cachet.UintValue(7),              // tenant_id
+    cachet.UintValue(0),              // status
+    cachet.BytesValue(body),          // payload
+    cachet.UintValue(0),              // version; the engine sets it
+)
+if _, err := c.PutRow(ctx, key, row); err != nil { ... }
+
+got, err := c.GetRow(ctx, key)        // same levels, same session, same metadata as Get
+if got.Found {
+    payload, _ := got.Row.Column("payload")
+    use(payload.Bytes)
+}
+```
+
+Descriptors come from the server rather than from your configuration deliberately. A client
+configured with its own copy of the schema is a second copy to keep in step with the first, and the
+failure mode of two copies drifting is reading one column's bytes under another column's name —
+silent, and wrong in a way no type checks. `table.Fingerprint` is how you notice the shape changed
+under you.
+
+`NewRow` checks the row against the table before anything is sent, so a wrong column count or a
+`NULL` in a `NOT NULL` column fails where you built it rather than a round trip away.
+
+Against a server too old to publish descriptors, `Table`, `GetRow`, `BatchGetRows` and `PutRow`
+return `cachet.ErrNoDescriptors`, and the typed API keeps working — see
+[ADR 0007](../docs/adr/0007-two-wire-protocols-at-once.md).
+
 ### Crossing a service boundary
 
 The watermark travels in **OpenTelemetry baggage**, which every instrumented transport already
@@ -228,9 +267,15 @@ if res.Degraded {
 
 ## The gRPC API
 
-`cachet.v1.CacheService`. Use this directly only if you are not writing Go; otherwise prefer the SDK
+`cachet.v2.CacheService`. Use this directly only if you are not writing Go; otherwise prefer the SDK
 above, which handles session propagation for you. Generate a client from
-[`api/cachet/v1/cachet.proto`](../api/cachet/v1/cachet.proto).
+[`api/cachet/v2/cachet.proto`](../api/cachet/v2/cachet.proto).
+
+`cachet.v1.CacheService` is served on the same listeners until 1.0. It describes rows with the
+fixture table's columns as protocol fields, so it cannot express anybody else's table; it remains
+only so that a client built before the change keeps working across the upgrade. The two are two
+spellings of one state — a v1 write is visible to a v2 reader and the reverse — which is what makes
+rolling a fleet, or rolling one back, safe. New clients should speak v2.
 
 | RPC | Purpose |
 |---|---|
