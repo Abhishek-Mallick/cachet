@@ -1,6 +1,14 @@
 package storage
 
-import "context"
+import (
+	"context"
+	"database/sql"
+)
+
+// DBForTest exposes the shard's connection so an introspection test can read INFORMATION_SCHEMA
+// through the same connection the queries will use — which is the point, since Introspect scopes
+// itself with DATABASE().
+func DBForTest(s *Shard) *sql.DB { return s.db }
 
 // ForceRowVersionForTest writes a row with an arbitrary version, bypassing the HLC.
 //
