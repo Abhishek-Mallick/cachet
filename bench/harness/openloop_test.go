@@ -103,13 +103,18 @@ func TestWarmupSamplesAreDiscarded(t *testing.T) {
 	// phase boundary is deterministic. A racing timer would make this test flaky for reasons that
 	// have nothing to do with the code under test.
 	//
-	// The parameters leave deliberate headroom. Cold work totals 20 x 50ms across 8 workers, about
-	// 125ms, comfortably inside the 300ms warmup — because a MEASURED request that queued behind
-	// unfinished warmup work is not a leak, it is correct open-loop accounting, and the two must
-	// not be conflated. An earlier version of this test asserted a tight p99 and failed under
-	// -race for exactly that reason.
+	// The parameters leave deliberate headroom, and the amount of it is the whole design of this
+	// test. A MEASURED request that queued behind unfinished warmup work is not a leak — it is
+	// correct open-loop accounting — so the two must not be conflated.
+	//
+	// One cold request per worker. At 100/s they are issued across the first 80ms and the last one
+	// completes around 130ms, well inside the 300ms warmup on a machine with nothing else to do
+	// AND on one running the whole suite under -race. An earlier version issued 20 of them, which
+	// spanned 200ms of issue time and finished at ~250ms: inside the warmup when the box was idle,
+	// and past it when it was not. That produced a p99 of 36ms against a 25ms threshold — neither
+	// a leaked 50ms sample nor ordinary noise, but a measured request that had queued.
 	const (
-		coldRequests = 20
+		coldRequests = 8
 		coldLatency  = 50 * time.Millisecond
 	)
 
@@ -136,6 +141,22 @@ func TestWarmupSamplesAreDiscarded(t *testing.T) {
 	}
 	if res.Read.Count() == 0 {
 		t.Fatal("no measurement samples were recorded; the assertion below would prove nothing")
+	}
+
+	// Every cold request has to have been dispatched inside the warmup, or the assertion below is
+	// about a phase boundary the parameters never crossed.
+	if res.WarmupRequests < coldRequests {
+		t.Fatalf("only %d requests were dispatched during warmup, fewer than the %d cold ones; "+
+			"the phase separation was not exercised", res.WarmupRequests, coldRequests)
+	}
+
+	// A driver that fell behind was not able to dispatch at its own rate, and every measured
+	// latency then includes queueing that has nothing to do with warmup leakage. Asserting on it
+	// anyway is what made this test fail on a machine running the whole suite under -race, with a
+	// p99 of 117ms — more than twice the cold latency a leak could even produce.
+	if res.Behind > 0 {
+		t.Skipf("the driver fell behind on %d dispatches, so measured latencies are queueing "+
+			"rather than evidence about the warmup phase", res.Behind)
 	}
 
 	// Cold caches, empty pools and a filling MyRocks block cache are not the steady state
