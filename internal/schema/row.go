@@ -68,6 +68,15 @@ func (v Value) Uint64() (uint64, error) {
 	return u, nil
 }
 
+// SQL renders the value as a query argument. NULL becomes an untyped nil, which the driver sends
+// as SQL NULL; everything else goes as the bytes MySQL gave us.
+func (v Value) SQL() any {
+	if v.IsNull {
+		return nil
+	}
+	return v.Bytes
+}
+
 // String renders the value for logs and for the CLI.
 func (v Value) String() string {
 	if v.IsNull {

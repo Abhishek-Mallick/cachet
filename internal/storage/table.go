@@ -19,10 +19,14 @@ type Table struct {
 	batchGet string // without the placeholder run, which depends on the batch size
 	insert   string
 	update   string
+	upsert   string
 	del      string
 	lockRow  string
 
 	predicates []PredicateSpec
+
+	// upsertAssigned is the column indexes the upsert's assignment list reassigns, in order.
+	upsertAssigned []int
 }
 
 // PredicateSpec is a conditional-write shape the deployment permits.
@@ -86,6 +90,25 @@ func NewTable(d *schema.Descriptor, indexes []Index, predicates ...PredicateSpec
 		lockRow:  "SELECT " + d.VersionColumn.Quoted() + " FROM " + d.QuotedName() + " WHERE " + pkMatch + " FOR UPDATE",
 	}
 
+	// ON DUPLICATE KEY UPDATE rather than REPLACE: REPLACE deletes and re-inserts, which fires
+	// delete triggers, churns the primary key index, and shows up in the binlog as two events the
+	// CDC tailer would have to reason about.
+	isKey := make(map[string]bool, len(d.PrimaryKey))
+	for _, k := range d.PrimaryKey {
+		isKey[k.Name] = true
+	}
+	dup := make([]string, 0, len(d.Columns))
+	for i := range d.Columns {
+		// Never reassign a primary key column: it is what the duplicate was detected on, and
+		// setting it would move the row's identity out from under its cache entry.
+		if isKey[d.Columns[i].Name] {
+			continue
+		}
+		dup = append(dup, d.Columns[i].Quoted()+" = ?")
+		t.upsertAssigned = append(t.upsertAssigned, i)
+	}
+	t.upsert = t.insert + " ON DUPLICATE KEY UPDATE " + strings.Join(dup, ", ")
+
 	for _, p := range predicates {
 		if err := t.validatePredicate(p, indexes); err != nil {
 			return nil, err
@@ -109,6 +132,30 @@ func (t *Table) UpdateStmt() string { return t.update }
 
 // DeleteStmt removes a row by primary key.
 func (t *Table) DeleteStmt() string { return t.del }
+
+// UpsertStmt inserts a row, or replaces it if the primary key is taken.
+//
+// It takes the row's arguments TWICE: once for the VALUES list and once for the assignments.
+func (t *Table) UpsertStmt() string { return t.upsert }
+
+// UpsertAssignedColumns is the column indexes UpsertStmt reassigns, in the order it expects them.
+func (t *Table) UpsertAssignedColumns() []int { return t.upsertAssigned }
+
+// KeyOf builds the key naming a row.
+func (t *Table) KeyOf(row []schema.Value) (schema.Key, error) {
+	if len(row) != len(t.d.Columns) {
+		return schema.Key{}, fmt.Errorf("storage: %s expects %d columns, got %d", t.d.Name, len(t.d.Columns), len(row))
+	}
+	values := make([]any, len(t.d.PrimaryKey))
+	for i, col := range t.d.PrimaryKey {
+		v := row[col.Index]
+		if v.IsNull {
+			return schema.Key{}, fmt.Errorf("storage: %s.%s is NULL and cannot name a row", t.d.Name, col.Name)
+		}
+		values[i] = string(v.Bytes)
+	}
+	return t.d.Key(values...)
+}
 
 // LockRowStmt reads a row's version FOR UPDATE.
 func (t *Table) LockRowStmt() string { return t.lockRow }

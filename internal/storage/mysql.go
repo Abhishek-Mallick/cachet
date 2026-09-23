@@ -45,6 +45,21 @@ type Shard struct {
 	id    ShardID
 	db    *sql.DB
 	clock *Clock
+
+	// table is the declared shape this shard serves, and the source of every statement issued
+	// against it. Nil means the shard predates descriptors and serves only the typed fixture API.
+	table *Table
+}
+
+// WithTable attaches a declared table to the shard.
+//
+// Separate from OpenShard so that the descriptor can come from configuration the caller has already
+// validated, and so a shard opened for introspection can exist before a table has been declared
+// against it — which is the order boot has to happen in: connect, read INFORMATION_SCHEMA, verify
+// the declaration, then serve.
+func (s *Shard) WithTable(t *Table) *Shard {
+	s.table = t
+	return s
 }
 
 // OpenShard connects to a shard and verifies it is reachable.
