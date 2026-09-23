@@ -203,7 +203,22 @@ func TestTheSuiteDetectsAViolation(t *testing.T) {
 		{"EVENTUAL", cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL, 0},
 	} {
 		t.Run(lv.name+"/read another session's write, after P", func(t *testing.T) {
+			before := env.cluster.CacheOpsForTest("get", "error")
 			held := readAnotherSessionAfterP(t, env, levelSpec{level: lv.level, bound: lv.bound})
+
+			// A cache that could not be reached is not a cache that invalidated. The engine falls
+			// through to the origin when a cache read fails — correct behaviour, and the fresh
+			// value it returns proves nothing about invalidation. Asserting on it anyway is how a
+			// suite acquires an intermittent failure that teaches everyone to re-run it, which is
+			// the habit that makes the whole suite worthless.
+			//
+			// Observed: a Valkey read timing out under load produced exactly this, and the cell
+			// reported that the suite could not detect violations.
+			if errs := env.cluster.CacheOpsForTest("get", "error") - before; errs > 0 {
+				t.Skipf("%d cache read(s) failed during this cell, so the origin answered rather "+
+					"than a cached entry; nothing about invalidation was exercised", errs)
+			}
+
 			if held {
 				t.Errorf("the naive cache passed a cell that depends on invalidation. Either the "+
 					"test does not detect the violation it claims to, or invalidation is running "+
