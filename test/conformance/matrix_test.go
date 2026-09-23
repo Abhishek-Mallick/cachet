@@ -259,10 +259,27 @@ func newEnv(t *testing.T, cfg config) *env {
 	}
 }
 
-// idsPerEnv is the slice of the id space each env owns. Generous: a cell uses tens of ids, and the
-// cost of a wide range is nothing while the cost of two envs meeting is a test that fails for a
-// reason nobody will find.
-const idsPerEnv = 10_000
+// The id space the conformance suite draws from.
+//
+// idsPerEnv is the slice each env owns. Generous: a cell uses tens of ids, and the cost of a wide
+// range is nothing while the cost of two envs meeting is a test that fails for a reason nobody will
+// find.
+//
+// idSpace is sized against the fact that these rows are never cleaned up. A run picks its base at
+// random, so the question is not whether two envs in one process collide — allocation settles that
+// — but whether a fresh run lands on a slot some earlier run already wrote. That probability is
+// (slots occupied so far)/(slots available), and it rises every time the suite is run. An earlier
+// version offered 90,000 slots; after a few hundred runs roughly 600 were occupied, which made a
+// per-run collision around even odds, surfacing as TestTheSDKReportsAMissAsAnAnswer finding a row
+// nothing in its process had written. A hundred million slots makes the same arithmetic
+// uninteresting for the life of the project.
+//
+// idBase sits above the range those earlier runs used, so their leftovers cannot be drawn at all.
+const (
+	idsPerEnv = 10_000
+	idSpace   = 1_000_000_000_000
+	idBase    = 10_000_000_000_000
+)
 
 var (
 	// runBase keeps one `go test` process clear of rows left by earlier ones, which are never
@@ -280,7 +297,7 @@ var (
 // exact collisions in 400 envs. Isolation cannot be a function of timing; it has to be a function
 // of allocation.
 func nextIDRange() uint64 {
-	return (runBase + envSeq.Add(1)*idsPerEnv) % 900_000_000
+	return (runBase + envSeq.Add(1)*idsPerEnv) % idSpace
 }
 
 func randomRunBase() uint64 {
@@ -288,9 +305,9 @@ func randomRunBase() uint64 {
 	if _, err := rand.Read(b[:]); err != nil {
 		// Only reachable if the system entropy source is broken. The clock is a worse base, but a
 		// worse base beats refusing to run the suite.
-		return uint64(time.Now().UnixNano()) % 90_000 * idsPerEnv
+		return uint64(time.Now().UnixNano()) % (idSpace / idsPerEnv) * idsPerEnv
 	}
-	return binary.LittleEndian.Uint64(b[:]) % 90_000 * idsPerEnv
+	return binary.LittleEndian.Uint64(b[:]) % (idSpace / idsPerEnv) * idsPerEnv
 }
 
 // key returns an id no other cell in this run, and no other env in this process, will touch.
@@ -298,7 +315,7 @@ func (e *env) key() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.next++
-	return fmt.Sprintf("entities:%d", 8_000_000_000+e.next)
+	return fmt.Sprintf("entities:%d", idBase+e.next)
 }
 
 // get reads at a level, carrying a session token.
