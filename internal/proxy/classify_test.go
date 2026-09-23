@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+
 	"github.com/Abhishek-Mallick/cachet/internal/proxy"
 	"github.com/Abhishek-Mallick/cachet/internal/schema"
 )
@@ -706,5 +708,36 @@ func TestTheMatcherRefusesAWriteToItsOwnTableWhateverTheShape(t *testing.T) {
 		if p := m.Classify(q); p.Kind != proxy.OpaqueWrite {
 			t.Errorf("Classify(%q) = %v, want OpaqueWrite", q, p.Kind)
 		}
+	}
+}
+
+// TestAStringArgumentArrivesAsTypedBytes pins the shape the wire protocol actually delivers.
+//
+// go-mysql hands a prepared statement's string, blob and decimal parameters back as TypedBytes —
+// the MySQL type plus raw bytes — not as a Go string. Refusing that type meant every string-valued
+// key was refused, which was invisible while the only cached table had an integer primary key: the
+// binary protocol sends those as int64. A VARCHAR-keyed table would never have been cached.
+func TestAStringArgumentArrivesAsTypedBytes(t *testing.T) {
+	t.Parallel()
+
+	m := ordersMatcher(t, false)
+	p := m.Classify("SELECT note FROM orders WHERE region = ? AND order_no = ?")
+	if p.Kind != proxy.PointSelect {
+		t.Fatalf("= %v, want PointSelect", p.Kind)
+	}
+
+	args := []any{
+		gomysql.TypedBytes{Type: gomysql.MYSQL_TYPE_VAR_STRING, Bytes: []byte("eu")},
+		int64(7),
+	}
+	if got := keyOf(t, m, p, args...); got != "orders:eu:7" {
+		t.Errorf("key = %q, want \"orders:eu:7\"", got)
+	}
+
+	// A NULL argument names no row, so the statement goes to the database rather than being
+	// answered from a key built out of nothing.
+	null := []any{gomysql.TypedBytes{Type: gomysql.MYSQL_TYPE_NULL}, int64(7)}
+	if _, ok := m.Key(p, null); ok {
+		t.Error("resolved a key from a NULL argument")
 	}
 }

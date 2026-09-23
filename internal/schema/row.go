@@ -70,9 +70,17 @@ func (v Value) Uint64() (uint64, error) {
 
 // SQL renders the value as a query argument. NULL becomes an untyped nil, which the driver sends
 // as SQL NULL; everything else goes as the bytes MySQL gave us.
+//
+// A non-NULL value whose Bytes are nil is sent as an EMPTY slice, not as the nil it holds. A nil
+// []byte reaching database/sql is converted to SQL NULL, so returning it here would write NULL for
+// the empty string — and the two are different facts, which is the entire reason this type carries
+// IsNull separately. Bytes arrive nil routinely: protobuf decodes an empty bytes field that way.
 func (v Value) SQL() any {
 	if v.IsNull {
 		return nil
+	}
+	if v.Bytes == nil {
+		return []byte{}
 	}
 	return v.Bytes
 }

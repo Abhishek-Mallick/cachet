@@ -12,6 +12,7 @@ import (
 
 	"github.com/Abhishek-Mallick/cachet/internal/cdc"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
+	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 )
 
 // Most conformance cells run without CDC, because the guarantee they test is carried by the write
@@ -130,9 +131,8 @@ func waitForTailers(t *testing.T, e *env, seen map[string]*atomic.Int64) {
 			if !ok {
 				t.Fatalf("no open shard %s", shard)
 			}
-			if _, err := sh.Put(context.Background(), storage.Record{
-				ID: canary, TenantID: 65000, Status: 1, Payload: []byte("canary"),
-			}); err != nil {
+			if _, err := sh.PutRow(context.Background(), table.Name,
+				table.Row(canary, 65000, 1, "canary")); err != nil {
 				t.Fatalf("canary write to %s: %v", shard, err)
 			}
 		}

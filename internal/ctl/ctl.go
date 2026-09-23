@@ -26,7 +26,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/cdc"
 	"github.com/Abhishek-Mallick/cachet/internal/config"
-	"github.com/Abhishek-Mallick/cachet/internal/engine"
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 )
 
@@ -42,6 +42,32 @@ func cachedTable(cfg config.Config) string {
 		return ""
 	}
 	return cfg.Tables[0].Name
+}
+
+// parseDeclaredKey parses a key and checks it names a table this deployment declared.
+//
+// Refusing an undeclared table is the same rule the engine applies, for the same reason: routing
+// and cache identity are both derived from the key, so a key for a table nobody declared would
+// route somewhere deterministic and describe an entry nothing can produce.
+func parseDeclaredKey(cfg config.Config, key string) (schema.Key, error) {
+	parsed, err := schema.ParseKey(key)
+	if err != nil {
+		return schema.Key{}, fmt.Errorf("ctl: %w", err)
+	}
+	descriptors, err := cfg.Descriptors()
+	if err != nil {
+		return schema.Key{}, fmt.Errorf("ctl: %w", err)
+	}
+	for _, d := range descriptors {
+		if d.Name != parsed.Table {
+			continue
+		}
+		if err := d.Validate(parsed); err != nil {
+			return schema.Key{}, fmt.Errorf("ctl: %w", err)
+		}
+		return parsed, nil
+	}
+	return schema.Key{}, fmt.Errorf("ctl: no table named %q is declared in this config", parsed.Table)
 }
 
 func sampleKey(cfg config.Config, i int) string {
@@ -165,12 +191,12 @@ type KeyLocation struct {
 
 // Locate reports which cache node and which shard own a key.
 func Locate(cfg config.Config, key string) (KeyLocation, error) {
-	// Parsed with the engine's own parser, so the tool cannot disagree with the engine about what a
+	// Parsed with the shared key grammar, so the tool cannot disagree with the engine about what a
 	// key means. A key this tool half-understands would route somewhere deterministic and send an
 	// operator to inspect a node that never held the row.
-	parsed, err := engine.ParseKey(cachedTable(cfg), key)
+	parsed, err := parseDeclaredKey(cfg, key)
 	if err != nil {
-		return KeyLocation{}, fmt.Errorf("ctl: %w", err)
+		return KeyLocation{}, err
 	}
 	canonical := parsed.String()
 
@@ -448,9 +474,9 @@ type AdmissionExplanation struct {
 // A control plane that cannot answer it leaves an operator to guess, and they will guess that
 // something is wrong.
 func ExplainAdmission(cfg config.Config, c *admission.Controller, key string) (AdmissionExplanation, error) {
-	parsed, err := engine.ParseKey(cachedTable(cfg), key)
+	parsed, err := parseDeclaredKey(cfg, key)
 	if err != nil {
-		return AdmissionExplanation{}, fmt.Errorf("ctl: %w", err)
+		return AdmissionExplanation{}, err
 	}
 	canonical := parsed.String()
 

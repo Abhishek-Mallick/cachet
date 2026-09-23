@@ -11,6 +11,7 @@ import (
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
+	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
 )
 
@@ -84,16 +85,20 @@ func TestShutdownLosesNoAckedWrite(t *testing.T) {
 			t.Fatalf("ShardFor(%s): %v", key, err)
 		}
 
-		rec, _, err := cluster.Shards[shardID].Get(ctx, a.id)
+		row, _, err := cluster.Shards[shardID].GetRow(ctx, table.Key(a.id))
 		if errors.Is(err, storage.ErrNotFound) {
 			t.Errorf("acknowledged write %s (version %d) is not in the database", key, a.version)
 			continue
 		}
 		if err != nil {
-			t.Fatalf("Get %s: %v", key, err)
+			t.Fatalf("GetRow %s: %v", key, err)
 		}
-		if uint64(rec.Version) != a.version {
-			t.Errorf("%s: stored version %d, acknowledged %d", key, rec.Version, a.version)
+		version, err := table.VersionOf(row)
+		if err != nil {
+			t.Fatalf("version of %s: %v", key, err)
+		}
+		if uint64(version) != a.version {
+			t.Errorf("%s: stored version %d, acknowledged %d", key, version, a.version)
 		}
 	}
 }

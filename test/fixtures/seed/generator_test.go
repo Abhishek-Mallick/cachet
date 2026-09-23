@@ -21,7 +21,7 @@ func TestGenerateProducesTheRequestedRowCount(t *testing.T) {
 	p := Profile{Name: "tiny", Rows: 500, Seed: 42, Tenants: 8, PayloadBytes: 64}
 
 	var n uint64
-	if err := Generate(p, func(storage.Record) error { n++; return nil }); err != nil {
+	if err := Generate(p, func(Record) error { n++; return nil }); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	if n != p.Rows {
@@ -98,7 +98,7 @@ func TestGenerateStopsOnYieldError(t *testing.T) {
 	// half-populated and a checksum that claims otherwise.
 	sentinel := errStop
 	n := 0
-	err := Generate(p, func(storage.Record) error {
+	err := Generate(p, func(Record) error {
 		n++
 		if n == 10 {
 			return sentinel
@@ -143,11 +143,11 @@ func TestRowsSpreadEvenlyAcrossShards(t *testing.T) {
 	}
 }
 
-func collect(t *testing.T, p Profile) []storage.Record {
+func collect(t *testing.T, p Profile) []Record {
 	t.Helper()
 
-	var out []storage.Record
-	if err := Generate(p, func(r storage.Record) error {
+	var out []Record
+	if err := Generate(p, func(r Record) error {
 		out = append(out, r)
 		return nil
 	}); err != nil {

@@ -401,3 +401,95 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestTheProxyServesSelectStarWhenTheDeclarationIsTheWholeRow closes the other half of the whole-row
+// proof.
+//
+// `entities` has an `updated_at` column the declaration does not, so `SELECT *` on it must be
+// refused — TestTheProxyProvesWhetherItCanServeSelectStar asserts that. `gadgets` declares every
+// column it has, so a cache entry IS the whole row and `*` can be answered from it. Until a second
+// table existed, only the refusal could be tested.
+func TestTheProxyServesSelectStarWhenTheDeclarationIsTheWholeRow(t *testing.T) {
+	ctx := context.Background()
+
+	desc := table.GadgetsDescriptor()
+	if undeclared := undeclaredColumns(t, desc); len(undeclared) != 0 {
+		t.Fatalf("gadgets has undeclared columns %v; the premise of this test is gone", undeclared)
+	}
+
+	cluster := harness.StartCachedWith(ctx, t, harness.CacheOptions{
+		TTL:                     time.Hour,
+		SynchronousInvalidation: true,
+		BothTables:              true,
+		Shards:                  []config.Shard{{ID: "shard0", DSN: proxyShardDSN}},
+	}, "tcp://127.0.0.1:0")
+
+	srv, err := proxy.New(proxy.Options{
+		Listen:           "127.0.0.1:0",
+		UpstreamAddr:     "127.0.0.1:3316",
+		UpstreamUser:     "root",
+		UpstreamPassword: "cachet",
+		UpstreamDB:       "cachet",
+		User:             "app",
+		Password:         "app-secret",
+		Table:            desc,
+		WholeTable:       true,
+		Engine:           cluster.Engine,
+		Cache:            cluster.Cache,
+		OpaqueWrites:     proxy.RefuseOpaqueWrites,
+	})
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	proxyCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() { _ = srv.Serve(proxyCtx) }()
+
+	db, err := sql.Open("mysql", fmt.Sprintf("app:app-secret@tcp(%s)/cachet", srv.Addr()))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Seeded directly, so the read path is the only thing under test.
+	const sku = "SKU-PROXY-1"
+	direct, err := sql.Open("mysql", proxyShardDSN)
+	if err != nil {
+		t.Fatalf("open upstream: %v", err)
+	}
+	defer func() { _ = direct.Close() }()
+	if _, err := direct.ExecContext(ctx,
+		"INSERT INTO gadgets (sku, region, price, note, row_version) VALUES (?, ?, ?, ?, ?) "+
+			"ON DUPLICATE KEY UPDATE region = VALUES(region), price = VALUES(price), "+
+			"note = VALUES(note), row_version = VALUES(row_version)",
+		sku, "eu", "12.34", nil, 1); err != nil {
+		t.Fatalf("seed gadget: %v", err)
+	}
+
+	// Two identical reads. The second must be served from the cache, and must still carry every
+	// column — which is the thing that could not be true before the declaration was proven whole.
+	//
+	// The key arrives as an ARGUMENT rather than a quoted literal, deliberately: the classifier's
+	// predicate grammar admits identifiers, integers and placeholders and nothing else, so a
+	// string key reaches it only as a bound parameter. That is a stated limitation of the matcher,
+	// and this is the shape applications actually send.
+	for _, pass := range []string{"first", "second"} {
+		var gotSKU, region, price string
+		var note sql.NullString
+		var version uint64
+		row := db.QueryRowContext(ctx, "SELECT * FROM gadgets WHERE sku = ?", sku)
+		if err := row.Scan(&gotSKU, &region, &price, &note, &version); err != nil {
+			t.Fatalf("%s SELECT *: %v", pass, err)
+		}
+		if gotSKU != sku || region != "eu" || price != "12.34" {
+			t.Errorf("%s read returned %q/%q/%q", pass, gotSKU, region, price)
+		}
+		if note.Valid {
+			t.Errorf("%s read returned note %q, want NULL", pass, note.String)
+		}
+	}
+
+	if hits := cluster.CacheOpsForTest("get", "hit"); hits == 0 {
+		t.Error("no read was served from the cache, so `SELECT *` was never answered from an entry")
+	}
+}

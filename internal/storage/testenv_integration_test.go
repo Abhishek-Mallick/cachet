@@ -14,6 +14,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 	"go.uber.org/goleak"
 
+	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 )
 
@@ -134,10 +135,57 @@ func tearDownShardContainer() {
 // forceRowVersion writes a row with an arbitrary version, bypassing the HLC. It exists to simulate
 // a second engine instance — or an out-of-band write made directly to MySQL — and must never be
 // used to set up ordinary state.
-func forceRowVersion(ctx context.Context, t *testing.T, sh *storage.Shard, rec storage.Record, v storage.Version) {
+func forceRowVersion(ctx context.Context, t *testing.T, sh *storage.Shard, row storage.Row, v storage.Version) {
 	t.Helper()
 
-	if err := storage.ForceRowVersionForTest(ctx, sh, rec, v); err != nil {
+	if err := storage.ForceRowVersionForTest(ctx, sh, entitiesTable, row, v); err != nil {
 		t.Fatalf("forceRowVersion: %v", err)
 	}
+}
+
+// entitiesTable is the fixture table the compose environment and this container both create.
+const entitiesTable = "entities"
+
+// entitiesShard opens a shard with the fixture table declared, verified and attached — the same
+// three steps boot performs, in the same order.
+func entitiesShard(ctx context.Context, t *testing.T) *storage.Shard {
+	t.Helper()
+
+	sh := openTestShard(ctx, t)
+	d := entitiesDescriptor(t)
+	cols, indexes, err := storage.Introspect(ctx, storage.DBForTest(sh), entitiesTable)
+	if err != nil {
+		t.Fatalf("Introspect: %v", err)
+	}
+	if err := storage.VerifyAgainstLive(d, cols); err != nil {
+		t.Fatalf("the declaration does not match the table: %v", err)
+	}
+	tbl, err := storage.NewTable(d, indexes,
+		storage.PredicateSpec{Match: []string{"tenant_id", "status"}, Set: []string{"status"}})
+	if err != nil {
+		t.Fatalf("NewTable: %v", err)
+	}
+	return sh.WithTables(tbl)
+}
+
+// entityRow builds a fixture row. The version is a placeholder: storage stamps its own.
+func entityRow(id uint64, tenant uint32, status uint8, payload string) storage.Row {
+	return storage.Row{
+		schema.Uint(id),
+		schema.Uint(uint64(tenant)),
+		schema.Uint(uint64(status)),
+		schema.Bin([]byte(payload)),
+		schema.Uint(0),
+	}
+}
+
+// entityKey names a fixture row.
+func entityKey(t *testing.T, id uint64) schema.Key {
+	t.Helper()
+
+	k, err := schema.KeyOf(entitiesTable, id)
+	if err != nil {
+		t.Fatalf("KeyOf: %v", err)
+	}
+	return k
 }

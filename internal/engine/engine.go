@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -15,7 +14,6 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/admission"
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/obs"
-	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
 )
@@ -53,16 +51,16 @@ type Cache interface {
 // Options configures an Engine.
 type Options struct {
 	// Router maps keys to shards.
-	Router *storage.Router
 	// Shards holds an open connection per shard id in Router.
 	Shards map[storage.ShardID]*storage.Shard
 
-	// Tables are the declared tables this engine serves, in declaration order.
+	// Tables are the declared tables this engine serves, in declaration order, each naming the
+	// shards it lives on.
 	//
 	// Required, and with no default. A built-in table would be a default that is wrong for
 	// everyone but this project's own fixtures, and the cacheable set is an operator's decision
 	// with consistency consequences (ADR 0005).
-	Tables []*schema.Descriptor
+	Tables []TableSpec
 
 	// Cache is optional. A nil cache is the Phase 0 configuration: every read goes to the database,
 	// which is the baseline every later row in the benchmark table is compared against.
@@ -121,12 +119,10 @@ type Options struct {
 type Engine struct {
 	cachetv1.UnimplementedCacheServiceServer
 
-	router *storage.Router
-	shards map[storage.ShardID]*storage.Shard
-
-	// tables is what this engine serves, by name, and tableOrder is the order it was declared in —
-	// which is the order the handshake publishes and an operator reads in a log line.
-	tables     map[string]*schema.Descriptor
+	// tables is what this engine serves, by name, each with its own ring over the shards it was
+	// declared on; tableOrder is the order it was declared in, which is the order the handshake
+	// publishes and an operator reads in a log line.
+	tables     map[string]*table
 	tableOrder []string
 
 	cache            Cache
@@ -151,19 +147,7 @@ type Engine struct {
 // the key space to a nil handle. Catching that at construction makes it a boot failure instead of a
 // panic on whichever request first hashes to the wrong place.
 func New(opts Options) (*Engine, error) {
-	if opts.Router == nil {
-		return nil, errors.New("engine: nil router")
-	}
-	for _, id := range opts.Router.Shards() {
-		if opts.Shards[id] == nil {
-			return nil, fmt.Errorf("engine: shard %q is in the topology but has no connection", id)
-		}
-	}
-	if len(opts.Shards) != len(opts.Router.Shards()) {
-		return nil, errors.New("engine: shard connections do not match the routing topology")
-	}
-
-	tables, order, err := declaredTables(opts.Tables)
+	tables, order, err := buildTables(opts.Tables, opts.Shards)
 	if err != nil {
 		return nil, err
 	}
@@ -195,8 +179,6 @@ func New(opts Options) (*Engine, error) {
 	}
 
 	return &Engine{
-		router:           opts.Router,
-		shards:           opts.Shards,
 		tables:           tables,
 		tableOrder:       order,
 		cache:            opts.Cache,
@@ -236,87 +218,6 @@ func (e *Engine) Handshake(_ context.Context, req *cachetv1.HandshakeRequest) (*
 			"client speaks %s, this server speaks %s", v, ProtocolVersion)
 	}
 	return resp, nil
-}
-
-// Get reads one row.
-//
-// Phase 0 has no cache, so every level is served from the database and the reported level is the
-// one that was asked for — a direct read satisfies all four. The consistency plumbing is
-// nevertheless exercised end to end from the first commit: the requirement is validated, the
-// session watermark is advanced, and the response reports what was served. Adding that later would
-// mean retrofitting it into a read path already shaped without it.
-func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.GetResponse, error) {
-	reqmt, err := consistency.RequirementFromProto(req.GetLevel(), req.GetStalenessBound())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	key, err := ParseKey(e.table().Name, req.GetKey())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	shard, id, err := e.shardFor(key.String())
-	if err != nil {
-		return nil, err
-	}
-	token := consistency.TokenFromProto(req.GetSession(), e.maxSessionShards)
-
-	entry, served, lease := e.fromCacheOrLease(ctx, reqmt, key.String(), id, token)
-	if served {
-		token.Advance(string(id), entry.RowVersion)
-		// A negative entry is a hit that reports absence. Serving it as found=false is what makes
-		// "this row does not exist" a cacheable answer rather than a guaranteed database query.
-		return &cachetv1.GetResponse{
-			Found:   !entry.Negative,
-			Record:  entryToProto(key.ID, entry),
-			Meta:    cacheHitMeta(reqmt.Level, entry),
-			Session: token.Proto(),
-		}, nil
-	}
-
-	rec, fill, err := shard.Get(ctx, key.ID)
-	e.metrics.RecordOriginRead()
-	switch {
-	case errors.Is(err, storage.ErrNotFound):
-		// Absence is an answer, not an error: "this row does not exist" is a cacheable fact, and an
-		// insert must later invalidate that negative entry.
-		//
-		// Nothing advances here: an absent row has no version, so there is no version a later read
-		// of this key could move backwards from. Read-own-inserts is carried by the INSERT
-		// advancing the watermark, not by this read.
-		_ = fill
-		e.fillNegativeHoldingLease(ctx, key.String(), fill, lease)
-		return &cachetv1.GetResponse{
-			Found:   false,
-			Meta:    readMeta(reqmt.Level, 0, fill),
-			Session: token.Proto(),
-		}, nil
-	case err != nil:
-		return nil, e.rpcError(ctx, "get", err)
-	}
-
-	// Observing advances the watermark, which is what gives monotonic reads without any extra
-	// state (CONSISTENCY.md §3.2).
-	//
-	// By the ROW's version, not the read's fill version. The guarantee is scoped to a key —
-	// "successive reads of k never move backwards in version" — and a fill version is "when we
-	// looked", which has nothing to do with k. Advancing by the fill version implements a far
-	// stronger rule, that no entry filled before the newest fill this session has seen on this
-	// shard may be served, and that rule costs the entire hit rate: every read ratchets the
-	// watermark past every other key's entry, so a session reading more than one key on a shard
-	// never gets a hit again.
-	//
-	// The row version is enough. An entry is served only when its FILL version is at or after the
-	// watermark, and an entry filled after the newest row version this session has observed cannot
-	// be hiding a write the session has already seen.
-	token.Advance(string(id), uint64(rec.Version))
-	e.fillHoldingLease(ctx, key.String(), rec, fill, lease)
-
-	return &cachetv1.GetResponse{
-		Found:   true,
-		Record:  recordToProto(rec),
-		Meta:    readMeta(reqmt.Level, rec.Version, fill),
-		Session: token.Proto(),
-	}, nil
 }
 
 // fromCache attempts to serve a read from the cache.
@@ -440,31 +341,6 @@ func (e *Engine) leaseForRefill(ctx context.Context, key string) string {
 // Failures are logged and counted but never returned: the caller already has the correct answer
 // from the database, and failing their request because the cache write failed would turn a
 // degradation into an outage.
-func (e *Engine) fill(ctx context.Context, key string, rec storage.Record, fillVersion storage.Version) {
-	e.fillHoldingLease(ctx, key, rec, fillVersion, "")
-}
-
-// fillHoldingLease is fill by a caller that was granted the lease for this key, which the fill hands
-// back. An empty token means no lease was held.
-func (e *Engine) fillHoldingLease(ctx context.Context, key string, rec storage.Record, fillVersion storage.Version, lease string) {
-	if e.cache == nil {
-		return
-	}
-	row, err := encodeRecord(rec)
-	if err != nil {
-		// A row that will not encode must not be cached: the next reader would get a decode error
-		// where a database read would have worked. Logged and skipped, so the read still succeeds.
-		e.log.Warn("cache fill skipped; the row did not encode", "key", key, "err", err)
-		return
-	}
-	entry := cache.Entry{
-		RowVersion:  uint64(rec.Version),
-		FillVersion: uint64(fillVersion),
-		Row:         row,
-	}
-	e.applyFillHoldingLease(ctx, key, entry, lease)
-}
-
 // fillNegative caches the fact that a row does not exist.
 //
 // Absence is a cacheable fact, and caching it is what stops a workload probing for missing keys from
@@ -548,167 +424,6 @@ func (e *Engine) invalidate(ctx context.Context, key string, version storage.Ver
 	}
 }
 
-// BatchGet reads several rows, one query per shard rather than one per key.
-//
-// There is deliberately no cross-key snapshot at any level: Cachet caches rows, not transactions.
-// Offering one here would invite the assumption that it holds across shards, where it cannot
-// (CONSISTENCY.md §6).
-func (e *Engine) BatchGet(ctx context.Context, req *cachetv1.BatchGetRequest) (*cachetv1.BatchGetResponse, error) {
-	reqmt, err := consistency.RequirementFromProto(req.GetLevel(), req.GetStalenessBound())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-
-	parsed := make(map[string]Key, len(req.GetKeys()))
-	for _, raw := range req.GetKeys() {
-		k, err := ParseKey(e.table().Name, raw)
-		if err != nil {
-			return nil, status.Error(codes.InvalidArgument, err.Error())
-		}
-		parsed[k.String()] = k
-	}
-
-	keys := make([]string, 0, len(parsed))
-	for k := range parsed {
-		keys = append(keys, k)
-	}
-	groups, err := e.router.Group(keys)
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-
-	token := consistency.TokenFromProto(req.GetSession(), e.maxSessionShards)
-	out := make(map[string]*cachetv1.Record, len(keys))
-	var newest storage.Version
-
-	for shardID, shardKeys := range groups {
-		ids := make([]uint64, 0, len(shardKeys))
-		for _, k := range shardKeys {
-			ids = append(ids, parsed[k].ID)
-		}
-
-		rows, fill, err := e.shards[shardID].BatchGet(ctx, ids)
-		if err != nil {
-			return nil, e.rpcError(ctx, "batch get", err)
-		}
-		// The newest ROW version in this batch, for the reason given in Get.
-		for _, rec := range rows {
-			token.Advance(string(shardID), uint64(rec.Version))
-		}
-		if fill > newest {
-			newest = fill
-		}
-		for _, k := range shardKeys {
-			rec, found := rows[parsed[k].ID]
-			if !found {
-				e.fillNegative(ctx, k, fill)
-				continue
-			}
-			out[k] = recordToProto(rec)
-			e.fill(ctx, k, rec, fill)
-		}
-	}
-
-	return &cachetv1.BatchGetResponse{
-		Records: out,
-		Meta:    readMeta(reqmt.Level, 0, newest),
-		Session: token.Proto(),
-	}, nil
-}
-
-// Put writes one row and advances the caller's session watermark to the committed version.
-//
-// The watermark advance is what makes read-own-writes possible at all: the client carries it
-// forward, and a later read rejects any cache entry filled before this write. Returning it is
-// therefore part of the write's contract, not a convenience.
-func (e *Engine) Put(ctx context.Context, req *cachetv1.PutRequest) (*cachetv1.PutResponse, error) {
-	key, err := ParseKey(e.table().Name, req.GetKey())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	if req.GetRecord() == nil {
-		return nil, status.Error(codes.InvalidArgument, "engine: put requires a record")
-	}
-	shard, id, err := e.shardFor(key.String())
-	if err != nil {
-		return nil, err
-	}
-
-	rec, err := recordFromProto(req.GetRecord())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	rec.ID = key.ID // the key is authoritative; a mismatched record.id would write to the wrong row
-
-	version, err := shard.Put(ctx, rec)
-	if err != nil {
-		return nil, e.rpcError(ctx, "put", err)
-	}
-
-	// After the commit, before the ack. By the time the caller holds this response, the stale entry
-	// is already tombstoned at this version — which is what lets a DIFFERENT process, handed this
-	// session token, read the write.
-	e.invalidate(ctx, key.String(), version)
-
-	token := consistency.TokenFromProto(req.GetSession(), e.maxSessionShards)
-	token.Advance(string(id), uint64(version))
-
-	return &cachetv1.PutResponse{
-		Meta:    &cachetv1.WriteMeta{Version: uint64(version)},
-		Session: token.Proto(),
-	}, nil
-}
-
-// Delete removes one row.
-func (e *Engine) Delete(ctx context.Context, req *cachetv1.DeleteRequest) (*cachetv1.DeleteResponse, error) {
-	key, err := ParseKey(e.table().Name, req.GetKey())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	shard, id, err := e.shardFor(key.String())
-	if err != nil {
-		return nil, err
-	}
-	token := consistency.TokenFromProto(req.GetSession(), e.maxSessionShards)
-
-	version, err := shard.Delete(ctx, key.ID)
-	switch {
-	case errors.Is(err, storage.ErrNotFound):
-		// Deleting an absent row is not an error, but the caller is told, because it determines
-		// whether a negative cache entry needed invalidating.
-		return &cachetv1.DeleteResponse{
-			Existed: false,
-			Meta:    &cachetv1.WriteMeta{},
-			Session: token.Proto(),
-		}, nil
-	case err != nil:
-		return nil, e.rpcError(ctx, "delete", err)
-	}
-
-	// A delete invalidates exactly like an update: the tombstone carries the delete's version, so a
-	// read that started earlier cannot refill the row it removed.
-	e.invalidate(ctx, key.String(), version)
-
-	token.Advance(string(id), uint64(version))
-	return &cachetv1.DeleteResponse{
-		Existed: true,
-		Meta:    &cachetv1.WriteMeta{Version: uint64(version)},
-		Session: token.Proto(),
-	}, nil
-}
-
-func (e *Engine) shardFor(key string) (*storage.Shard, storage.ShardID, error) {
-	id, err := e.router.ShardFor(key)
-	if err != nil {
-		return nil, "", status.Error(codes.InvalidArgument, err.Error())
-	}
-	shard := e.shards[id]
-	if shard == nil {
-		return nil, "", status.Errorf(codes.Internal, "engine: no connection for shard %q", id)
-	}
-	return shard, id, nil
-}
-
 // rpcError maps a storage failure onto a gRPC status.
 //
 // Cancellation is reported as such rather than as an internal error: a client that walked away
@@ -720,6 +435,12 @@ func (e *Engine) rpcError(ctx context.Context, op string, err error) error {
 		return status.Error(codes.Canceled, err.Error())
 	case errors.Is(err, context.DeadlineExceeded):
 		return status.Error(codes.DeadlineExceeded, err.Error())
+	case errors.Is(err, ErrInvalidRequest):
+		// The caller asked something this engine cannot answer — an undeclared table, a key that
+		// does not fit its columns, a row of the wrong shape. Reported with the reason, because it
+		// is the caller who can fix it; an Internal here would send them to read server logs for a
+		// mistake they made.
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	e.log.ErrorContext(ctx, "storage error", "op", op, "err", err)
 	return status.Errorf(codes.Internal, "engine: %s failed", op)
@@ -741,58 +462,4 @@ func cacheHitMeta(level consistency.Level, entry cache.Entry) *cachetv1.ReadMeta
 		RowVersion:  entry.RowVersion,
 		FillVersion: entry.FillVersion,
 	}
-}
-
-// entryToProto renders a cached entry as the record a caller sees.
-//
-// It must produce the SAME record recordToProto would produce for an uncached read of the same row.
-// Phase 1 omitted tenant_id and status here, reasoning that nothing read them on the hot path —
-// true until conditional writes made status meaningful, at which point the same key returned a
-// different status depending on whether the cache happened to be warm. The conformance suite caught
-// it; TestACachedReadReturnsTheSameRecordAsAnUncachedOne keeps it caught.
-func entryToProto(id uint64, entry cache.Entry) *cachetv1.Record {
-	rec, err := decodeRecord(entry.Row)
-	if err != nil {
-		// Unreachable on a healthy entry: the Lua only returns rows whose fingerprint matches this
-		// build's, so the shape is known before the bytes are read. Returning the versions with an
-		// empty row is the conservative answer if it ever happens — wrong in the same direction as
-		// a miss rather than in the direction of inventing column values.
-		return &cachetv1.Record{Id: id, Version: entry.RowVersion}
-	}
-	return &cachetv1.Record{
-		Id:       id,
-		TenantId: rec.TenantID,
-		Status:   uint32(rec.Status),
-		Payload:  rec.Payload,
-		Version:  entry.RowVersion,
-	}
-}
-
-func recordToProto(r storage.Record) *cachetv1.Record {
-	return &cachetv1.Record{
-		Id:       r.ID,
-		TenantId: r.TenantID,
-		Status:   uint32(r.Status),
-		Payload:  r.Payload,
-		Version:  uint64(r.Version),
-	}
-}
-
-// recordFromProto decodes a record from the wire.
-//
-// status is uint32 on the wire (proto3 has no uint8) and uint8 in the schema, so an out-of-range
-// value has to be rejected here. Converting it silently would wrap — a client sending 300 would
-// store 44 — and the row would then differ from what the caller believes it wrote, which is a
-// consistency bug arriving through a type conversion rather than through the cache.
-func recordFromProto(p *cachetv1.Record) (storage.Record, error) {
-	st := p.GetStatus()
-	if st > math.MaxUint8 {
-		return storage.Record{}, fmt.Errorf("engine: status %d does not fit in a uint8", st)
-	}
-	return storage.Record{
-		ID:       p.GetId(),
-		TenantID: p.GetTenantId(),
-		Status:   uint8(st),
-		Payload:  p.GetPayload(),
-	}, nil
 }

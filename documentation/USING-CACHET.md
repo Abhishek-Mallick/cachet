@@ -108,6 +108,8 @@ topologies:
   - name: main
     shards: [shard0, shard1, shard2]
 
+# Declare as many tables as you cache. Each is routed over its topology's shards, so two tables
+# that must be read together belong to one topology and a table sharded differently gets its own.
 tables:
   - name: entities
     topology: main

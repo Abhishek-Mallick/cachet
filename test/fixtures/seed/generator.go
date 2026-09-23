@@ -16,8 +16,6 @@ import (
 	"math/rand"
 	"sort"
 	"strconv"
-
-	"github.com/Abhishek-Mallick/cachet/internal/storage"
 )
 
 // errStop is returned by tests to abort generation partway through.
@@ -62,6 +60,19 @@ func ProfileByName(name string) (Profile, error) {
 // is part of the contract between the seeder, the engine, and the benchmark harness.
 func CacheKey(id uint64) string { return "entities:" + strconv.FormatUint(id, 10) }
 
+// Record is one fixture row.
+//
+// Declared here rather than borrowed from the storage package. Storage carries rows generically
+// now — a table's shape is a declaration, not a Go struct — and the fixture generator is the one
+// place that legitimately knows this particular table's five columns, because it is the thing that
+// invents their values.
+type Record struct {
+	ID       uint64
+	TenantID uint32
+	Status   uint8
+	Payload  []byte
+}
+
 // Generate produces the profile's rows in a fixed order, handing each to yield.
 //
 // Rows are streamed rather than returned as a slice: the large profile is ten million rows, and
@@ -69,7 +80,7 @@ func CacheKey(id uint64) string { return "entities:" + strconv.FormatUint(id, 10
 //
 // Generation stops at the first yield error so that a failing insert batch aborts the seed rather
 // than leaving a shard half-populated behind a checksum that claims otherwise.
-func Generate(p Profile, yield func(storage.Record) error) error {
+func Generate(p Profile, yield func(Record) error) error {
 	if p.Rows == 0 {
 		return nil
 	}
@@ -93,7 +104,7 @@ func Generate(p Profile, yield func(storage.Record) error) error {
 		row := make([]byte, p.PayloadBytes)
 		copy(row, payload)
 
-		rec := storage.Record{
+		rec := Record{
 			ID:       id,
 			TenantID: uint32(rng.Int31n(int32(p.Tenants))),
 			Status:   uint8(rng.Int31n(4)),
@@ -108,7 +119,7 @@ func Generate(p Profile, yield func(storage.Record) error) error {
 
 // Checksum returns a stable digest of a set of records, used to prove two seed runs produced
 // identical data without comparing every row by hand.
-func Checksum(recs []storage.Record) string {
+func Checksum(recs []Record) string {
 	h := sha256.New()
 	for _, r := range recs {
 		HashRecord(h, r)
@@ -119,7 +130,7 @@ func Checksum(recs []storage.Record) string {
 // HashRecord folds one record into a running digest. The loader hashes per shard as it streams,
 // and Checksum hashes a materialised slice; both go through here so the two can never disagree
 // about field order and silently report mismatched checksums for identical data.
-func HashRecord(h hash.Hash, r storage.Record) {
+func HashRecord(h hash.Hash, r Record) {
 	var scratch [8]byte
 	binary.BigEndian.PutUint64(scratch[:], r.ID)
 	_, _ = h.Write(scratch[:])

@@ -138,3 +138,42 @@ func TestCorruptBytesAreRefusedRatherThanPartiallyDecoded(t *testing.T) {
 		t.Error("decoded nil bytes")
 	}
 }
+
+// TestAnEmptyValueIsNotNullOnTheWire pins the difference between the two absences.
+//
+// A nil []byte reaching database/sql is converted to SQL NULL. Values arrive with nil Bytes
+// routinely — protobuf decodes an empty bytes field that way — so a non-NULL value has to render
+// as an empty slice or the empty string would be written as NULL. It cost an e2e test to find the
+// first time.
+func TestAnEmptyValueIsNotNullOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	for name, v := range map[string]schema.Value{
+		"an empty string":     schema.Str(""),
+		"empty bytes":         schema.Bin([]byte{}),
+		"nil bytes, not null": schema.Bin(nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			arg := v.SQL()
+			if arg == nil {
+				t.Fatal("rendered as an untyped nil, which the driver sends as SQL NULL")
+			}
+			b, ok := arg.([]byte)
+			if !ok {
+				t.Fatalf("rendered as %T, want []byte", arg)
+			}
+			if b == nil {
+				t.Error("rendered as a nil []byte, which database/sql converts to SQL NULL")
+			}
+			if len(b) != 0 {
+				t.Errorf("rendered %q, want an empty value", b)
+			}
+		})
+	}
+
+	if schema.Null().SQL() != nil {
+		t.Error("NULL did not render as an untyped nil")
+	}
+}

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+
 	"github.com/Abhishek-Mallick/cachet/internal/schema"
 )
 
@@ -376,14 +378,16 @@ func (m *Matcher) Key(p Plan, args []any) (schema.Key, bool) {
 		} else {
 			text = term.Literal
 		}
-		if !fitsColumn(m.d.PrimaryKey[i], text) {
-			return schema.Key{}, false
-		}
 		values[i] = text
 	}
 
 	k, err := m.d.Key(values...)
 	if err != nil {
+		return schema.Key{}, false
+	}
+	// Checked against the declared column types with the same rule the engine applies, so the
+	// proxy cannot claim to know about a row the engine would refuse to name.
+	if err := m.d.Validate(k); err != nil {
 		return schema.Key{}, false
 	}
 	return k, true
@@ -393,8 +397,19 @@ func (m *Matcher) Key(p Plan, args []any) (schema.Key, bool) {
 //
 // A float is refused rather than formatted: the rendering of a float is a choice, and a key built
 // from one choice would not match a key built from another.
+//
+// TypedBytes is how the wire protocol hands back a string, a blob or a decimal — the MySQL type
+// plus the raw bytes. Not handling it meant every string-valued bound parameter was refused, which
+// was invisible while the only cached table had an integer primary key: the binary protocol sends
+// those as int64. A table keyed by a VARCHAR would simply never have been cached through the proxy.
 func argText(v any) (string, bool) {
 	switch a := v.(type) {
+	case gomysql.TypedBytes:
+		if a.Bytes == nil {
+			// A NULL argument. A key value cannot be NULL, so there is no row to name.
+			return "", false
+		}
+		return string(a.Bytes), true
 	case uint64:
 		return strconv.FormatUint(a, 10), true
 	case int64:
@@ -407,31 +422,6 @@ func argText(v any) (string, bool) {
 		return string(a), true
 	default:
 		return "", false
-	}
-}
-
-// fitsColumn checks a key value against the column that will hold it.
-//
-// An out-of-range integer is not a row this proxy will claim to know about: MySQL would reject or
-// truncate it, and either way the row the caller meant is not the row the key names.
-func fitsColumn(col *schema.Column, text string) bool {
-	switch col.Type {
-	case schema.Uint8:
-		v, err := strconv.ParseUint(text, 10, 8)
-		return err == nil && text == strconv.FormatUint(v, 10)
-	case schema.Uint32:
-		v, err := strconv.ParseUint(text, 10, 32)
-		return err == nil && text == strconv.FormatUint(v, 10)
-	case schema.Uint64:
-		v, err := strconv.ParseUint(text, 10, 64)
-		return err == nil && text == strconv.FormatUint(v, 10)
-	case schema.Int64:
-		v, err := strconv.ParseInt(text, 10, 64)
-		return err == nil && text == strconv.FormatInt(v, 10)
-	case schema.String, schema.Bytes, schema.Text:
-		return true
-	default:
-		return false
 	}
 }
 

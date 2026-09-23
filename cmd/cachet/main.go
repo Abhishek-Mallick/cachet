@@ -94,11 +94,21 @@ func run() error {
 		return err
 	}
 
-	shards, router, err := openShards(ctx, cfg, log)
+	shards, err := openShards(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
 	defer closeShards(shards, log)
+
+	// Verified against INFORMATION_SCHEMA before a single request is accepted. Doing it lazily
+	// would move a configuration error from startup to the first user request.
+	tables, err := engine.OpenTables(ctx, cfg, shards)
+	if err != nil {
+		return err
+	}
+	for _, d := range descriptors {
+		log.Info("table verified", "table", d.Name, "columns", len(d.Columns), "fingerprint", d.Fingerprint)
+	}
 
 	// A cache is optional. With no addresses configured the engine runs uncached, which is the
 	// Phase 0 baseline configuration and stays available as a control rather than being deleted.
@@ -126,9 +136,8 @@ func run() error {
 	}
 
 	eng, err := engine.New(engine.Options{
-		Router:           router,
 		Shards:           shards,
-		Tables:           descriptors,
+		Tables:           tables,
 		Cache:            cacheClient,
 		MaxSessionShards: cfg.Consistency.MaxSessionShards,
 		MaxAffectedKeys:  cfg.Consistency.MaxAffectedKeys,
@@ -177,10 +186,9 @@ func run() error {
 // quarter of its traffic with errors while reporting itself healthy, which is worse than not
 // starting.
 func openShards(ctx context.Context, cfg config.Config, log *slog.Logger) (
-	map[storage.ShardID]*storage.Shard, *storage.Router, error,
+	map[storage.ShardID]*storage.Shard, error,
 ) {
 	shards := make(map[storage.ShardID]*storage.Shard, len(cfg.Shards))
-	ids := make([]storage.ShardID, 0, len(cfg.Shards))
 
 	for _, sc := range cfg.Shards {
 		id := storage.ShardID(sc.ID)
@@ -190,19 +198,12 @@ func openShards(ctx context.Context, cfg config.Config, log *slog.Logger) (
 		sh, err := storage.OpenShard(ctx, id, sc.DSN, storage.NewClock(time.Now))
 		if err != nil {
 			closeShards(shards, log)
-			return nil, nil, err
+			return nil, err
 		}
 		shards[id] = sh
-		ids = append(ids, id)
 		log.Info("shard connected", "shard", id)
 	}
-
-	router, err := storage.NewRouter(ids)
-	if err != nil {
-		closeShards(shards, log)
-		return nil, nil, err
-	}
-	return shards, router, nil
+	return shards, nil
 }
 
 func closeShards(shards map[storage.ShardID]*storage.Shard, log *slog.Logger) {

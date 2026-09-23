@@ -32,6 +32,32 @@ CREATE TABLE IF NOT EXISTS entities (
   KEY idx_tenant_status (tenant_id, status)
 ) ENGINE=INNODB;
 
+-- A second table, deliberately unlike `entities` in every way that used to be compiled in.
+--
+-- String primary key, a nullable column, a DECIMAL carried as text, and a version column that is
+-- not called `version`. It exists so that "Cachet caches an arbitrary table" is a claim the test
+-- suite can execute rather than one the code merely permits.
+--
+-- utf8mb4_bin on the key column, not the database default: under `utf8mb4_0900_ai_ci` MySQL treats
+-- 'SKU-1' and 'sku-1' as the same row while Go produces two cache keys, so an invalidation would
+-- silently miss. Cachet refuses such a key at boot, and this table is how that refusal is proven
+-- to be avoidable rather than merely present.
+CREATE TABLE IF NOT EXISTS gadgets (
+  sku         VARCHAR(64)      NOT NULL COLLATE utf8mb4_bin,
+  region      VARCHAR(16)      NOT NULL COLLATE utf8mb4_bin,
+  price       DECIMAL(10,2)    NOT NULL,
+  note        TEXT             NULL,
+
+  -- Cachet maintains it, like `entities.version`. The NAME is the point: nothing in the engine,
+  -- the proxy or the tailer may assume a version column is called `version`.
+  row_version BIGINT UNSIGNED  NOT NULL,
+
+  PRIMARY KEY (sku),
+  KEY idx_row_version (row_version),
+  -- Supports the declared conditional write, which must match on an indexed leading prefix.
+  KEY idx_region (region)
+) ENGINE=INNODB;
+
 -- Seed bookkeeping: lets `make env-status` and the harness answer "which profile is loaded, and was
 -- it loaded completely?" without counting ten million rows.
 CREATE TABLE IF NOT EXISTS seed_meta (

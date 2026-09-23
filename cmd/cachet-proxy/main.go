@@ -137,11 +137,6 @@ func run() error {
 	}
 	defer func() { _ = shard.Close() }()
 
-	router, err := storage.NewRouter([]storage.ShardID{storage.ShardID(cfg.Shards[0].ID)})
-	if err != nil {
-		return err
-	}
-
 	if len(cfg.Cache.Addresses) == 0 {
 		return errors.New("cachet-proxy: no cache configured; without one this is a slower MySQL")
 	}
@@ -156,10 +151,15 @@ func run() error {
 	}
 	defer func() { _ = cc.Close() }()
 
+	shards := map[storage.ShardID]*storage.Shard{storage.ShardID(cfg.Shards[0].ID): shard}
+	tables, err := engine.OpenTables(ctx, cfg, shards)
+	if err != nil {
+		return err
+	}
+
 	eng, err := engine.New(engine.Options{
-		Router:                  router,
-		Tables:                  descriptors,
-		Shards:                  map[storage.ShardID]*storage.Shard{storage.ShardID(cfg.Shards[0].ID): shard},
+		Shards:                  shards,
+		Tables:                  tables,
 		Cache:                   cc,
 		MaxSessionShards:        cfg.Consistency.MaxSessionShards,
 		MaxAffectedKeys:         cfg.Consistency.MaxAffectedKeys,
@@ -186,14 +186,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	live, _, err := shard.Introspect(ctx, desc.Name)
+	undeclared, err := engine.UndeclaredColumnsOn(ctx, cfg, shards, desc.Name)
 	if err != nil {
 		return err
 	}
-	if err := storage.VerifyAgainstLive(desc, live); err != nil {
-		return err
-	}
-	undeclared := storage.UndeclaredColumns(desc, live)
 	log.Info("cached table verified",
 		"table", desc.Name,
 		"columns", len(desc.Columns),

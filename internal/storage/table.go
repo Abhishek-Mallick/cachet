@@ -23,7 +23,7 @@ type Table struct {
 	del      string
 	lockRow  string
 
-	predicates []PredicateSpec
+	predicates []*Predicate
 
 	// upsertAssigned is the column indexes the upsert's assignment list reassigns, in order.
 	upsertAssigned []int
@@ -48,6 +48,9 @@ type Index struct {
 type LiveColumn struct {
 	Name     string
 	Nullable bool
+
+	// Collation is empty for non-character columns.
+	Collation string
 }
 
 // NewTable builds the statements and validates the declared predicates.
@@ -113,9 +116,126 @@ func NewTable(d *schema.Descriptor, indexes []Index, predicates ...PredicateSpec
 		if err := t.validatePredicate(p, indexes); err != nil {
 			return nil, err
 		}
-		t.predicates = append(t.predicates, p)
+		built, err := t.buildPredicate(p)
+		if err != nil {
+			return nil, err
+		}
+		t.predicates = append(t.predicates, built)
 	}
 	return t, nil
+}
+
+// Predicate is one declared conditional-write shape, with its statements built.
+//
+// Built at boot from identifiers the schema package already validated, like every other statement
+// here: no request ever contributes a column name, so there is nothing to escape at write time and
+// nothing on the hot path concatenating SQL.
+type Predicate struct {
+	spec PredicateSpec
+
+	// resolve locks the matching rows and reads their keys and versions.
+	resolve string
+
+	// update applies the write by the predicate, used only when the key resolution was abandoned.
+	update string
+
+	// updateByKey applies it to an explicit key list; the placeholder run is appended per call,
+	// because its length is the only part that varies.
+	updateByKey string
+}
+
+// Spec is the declaration this predicate was built from.
+func (p *Predicate) Spec() PredicateSpec { return p.spec }
+
+// ResolveStmt locks the rows the predicate matches, in key order.
+func (p *Predicate) ResolveStmt() string { return p.resolve }
+
+// UpdateStmt applies the write by the predicate itself.
+func (p *Predicate) UpdateStmt() string { return p.update }
+
+// UpdateByKeyStmt applies the write to exactly n resolved rows.
+func (p *Predicate) UpdateByKeyStmt(n int) (string, error) {
+	if n <= 0 {
+		return "", fmt.Errorf("storage: update by key with %d keys", n)
+	}
+	return p.updateByKey + "(" + strings.TrimSuffix(strings.Repeat("?, ", n), ", ") + ")", nil
+}
+
+// Predicate returns the declared predicate matching and setting exactly these columns.
+//
+// Exact, not a superset. A request that matches on fewer columns than a declared predicate selects
+// MORE rows than the deployment agreed to allow a single write to touch, and one that sets fewer
+// changes something different. Neither is the shape that was validated against the table's indexes,
+// so neither is served.
+func (t *Table) Predicate(match, set []string) (*Predicate, error) {
+	for _, p := range t.predicates {
+		if sameColumns(p.spec.Match, match) && sameColumns(p.spec.Set, set) {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s declares none matching on %v and setting %v",
+		ErrInvalidPredicate, t.d.Name, match, set)
+}
+
+// Predicates returns every declared shape, in declaration order.
+func (t *Table) Predicates() []*Predicate { return t.predicates }
+
+// sameColumns compares two column sets, ignoring order.
+//
+// Ignoring order because a conjunction of equalities means the same thing however it is written,
+// and requiring the declared order would refuse a request that is identical in effect.
+func sameColumns(declared, requested []string) bool {
+	if len(declared) != len(requested) {
+		return false
+	}
+	seen := make(map[string]int, len(declared))
+	for _, c := range declared {
+		seen[c]++
+	}
+	for _, c := range requested {
+		seen[c]--
+		if seen[c] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// buildPredicate renders the three statements one declared predicate needs.
+func (t *Table) buildPredicate(spec PredicateSpec) (*Predicate, error) {
+	// Resolution reads the primary key of every locked row and hands it back as a cache key, so a
+	// composite key would have to be re-selected with a row constructor — which MyRocks plans
+	// differently and which BatchGetStmt already refuses for the same reason. Refused at boot
+	// rather than at the first conditional write.
+	if len(t.d.PrimaryKey) != 1 {
+		return nil, fmt.Errorf("storage: %s has a composite primary key; conditional writes are single-column only", t.d.Name)
+	}
+
+	match := make([]string, len(spec.Match))
+	for i, name := range spec.Match {
+		match[i] = t.d.Column(name).Quoted() + " = ?"
+	}
+	where := strings.Join(match, " AND ")
+
+	// The version column is assigned by Cachet on every conditional write, last, so the stamped
+	// version outranks every row the write replaces and the resulting tombstone cannot lose its
+	// compare-and-set.
+	assign := make([]string, 0, len(spec.Set)+1)
+	for _, name := range spec.Set {
+		assign = append(assign, t.d.Column(name).Quoted()+" = ?")
+	}
+	assign = append(assign, t.d.VersionColumn.Quoted()+" = ?")
+	set := strings.Join(assign, ", ")
+
+	pk := t.d.PrimaryKey[0].Quoted()
+	return &Predicate{
+		spec: spec,
+		resolve: "SELECT " + pk + ", " + t.d.VersionColumn.Quoted() +
+			" FROM " + t.d.QuotedName() + " WHERE " + where +
+			" ORDER BY " + pk + " LIMIT ? FOR UPDATE",
+		update:      "UPDATE " + t.d.QuotedName() + " SET " + set + " WHERE " + where,
+		updateByKey: "UPDATE " + t.d.QuotedName() + " SET " + set + " WHERE " + pk + " IN ",
+	}, nil
 }
 
 // Descriptor is the shape this table's rows have.
@@ -257,10 +377,39 @@ func VerifyAgainstLive(d *schema.Descriptor, live []LiveColumn) error {
 			return fmt.Errorf("storage: %s.%s is declared nullable=%t but the table has nullable=%t",
 				d.Name, col.Name, col.Nullable, actual.Nullable)
 		}
+		if err := checkKeyCollation(d, col, actual); err != nil {
+			return err
+		}
 	}
 	// Extra columns in the table are fine and expected — `updated_at` is one. They are simply not
 	// cached, which the proxy expresses by refusing to serve `SELECT *`. UndeclaredColumns is how
 	// it finds out.
+	return nil
+}
+
+// checkKeyCollation verifies a string primary key column's DECLARED collation against the live one.
+//
+// The declaration alone is not enough. Under `utf8mb4_0900_ai_ci` MySQL treats 'Ann' and 'ann' as
+// the SAME row while Go produces two cache keys, so an invalidation silently misses — the hazard
+// ADR 0005 ranks first. A deployment declaring `utf8mb4_bin` over a `_ci` column would pass every
+// config check and hit that hazard in production, which is why the two are compared here, against
+// the database, at boot.
+func checkKeyCollation(d *schema.Descriptor, col *schema.Column, actual LiveColumn) error {
+	isKey := false
+	for _, k := range d.PrimaryKey {
+		if k.Name == col.Name {
+			isKey = true
+			break
+		}
+	}
+	if !isKey || actual.Collation == "" {
+		return nil
+	}
+	if !strings.EqualFold(col.Collation, actual.Collation) {
+		return fmt.Errorf("storage: %s.%s is a primary key column declared with collation %q, "+
+			"but the table has %q; two cache keys could name one row",
+			d.Name, col.Name, col.Collation, actual.Collation)
+	}
 	return nil
 }
 

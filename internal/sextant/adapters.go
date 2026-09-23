@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"strconv"
 	"sync"
 
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
@@ -56,10 +55,14 @@ func NewOriginAdapter(router *storage.Router, shards map[storage.ShardID]*storag
 }
 
 // Version returns a row's current version.
+//
+// Read through the shard's declared table rather than a statement written here, so the verifier
+// reads the same columns the engine caches. A second way to read the origin is a second thing that
+// can be wrong about what the origin holds, which is the one thing a verifier must not be.
 func (a *OriginAdapter) Version(ctx context.Context, key string) (uint64, bool, error) {
-	id, err := parseKeyID(key)
+	parsed, err := schema.ParseKey(key)
 	if err != nil {
-		return 0, false, err
+		return 0, false, fmt.Errorf("sextant: parse key %q: %w", key, err)
 	}
 	shardID, err := a.router.ShardFor(key)
 	if err != nil {
@@ -70,14 +73,23 @@ func (a *OriginAdapter) Version(ctx context.Context, key string) (uint64, bool, 
 		return 0, false, fmt.Errorf("sextant: no open shard %s", shardID)
 	}
 
-	rec, _, err := shard.Get(ctx, id)
+	row, _, err := shard.GetRow(ctx, parsed)
 	if errors.Is(err, storage.ErrNotFound) {
 		return 0, false, nil
 	}
 	if err != nil {
 		return 0, false, fmt.Errorf("sextant: read %s: %w", key, err)
 	}
-	return uint64(rec.Version), true, nil
+
+	t, err := shard.Table(parsed.Table)
+	if err != nil {
+		return 0, false, fmt.Errorf("sextant: %w", err)
+	}
+	version, err := row[t.Descriptor().VersionColumn.Index].Uint64()
+	if err != nil {
+		return 0, false, fmt.Errorf("sextant: read %s: %w", key, err)
+	}
+	return version, true, nil
 }
 
 // Shard names the shard a key belongs to.
@@ -87,27 +99,6 @@ func (a *OriginAdapter) Shard(key string) (string, error) {
 		return "", fmt.Errorf("sextant: route %s: %w", key, err)
 	}
 	return string(id), nil
-}
-
-// parseKeyID extracts the numeric primary key from "<table>:<id>".
-//
-// The table name is not checked here because Sextant is handed keys, never asked to invent them:
-// they come from the binlog of the table it was configured to follow. What matters is the key
-// grammar, which is shared with the engine and the tailer — parsing it a second way here is how a
-// verifier ends up checking a row nobody wrote.
-func parseKeyID(key string) (uint64, error) {
-	parsed, err := schema.ParseKey(key)
-	if err != nil {
-		return 0, fmt.Errorf("sextant: parse key %q: %w", key, err)
-	}
-	if len(parsed.Values) != 1 {
-		return 0, fmt.Errorf("sextant: key %q is composite; this adapter reads a single-column key", key)
-	}
-	id, err := strconv.ParseUint(parsed.Values[0], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("sextant: parse key %q: %w", key, err)
-	}
-	return id, nil
 }
 
 // RecentKeys is a bounded, recency-weighted source of keys to check.

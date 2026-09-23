@@ -55,6 +55,13 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 - **Generic rows on the wire, over a protocol the server describes.** The SDK gains `GetRow`,
   `BatchGetRows` and `PutRow` against table descriptors it learns at the handshake, rather than
   against a schema you configure it with a second copy of.
+- **One engine serves several declared tables.** Each is routed over the shards its topology names,
+  because routing comes from the key and the key is namespaced by table — a single ring shared by
+  every table would be correct only by coincidence. Reads, writes, batches and conditional writes
+  all run against the declaration: there is no typed path left for a fixture table.
+- **Conditional writes on any declared shape.** A predicate matches and sets the columns the
+  deployment declared, resolves its affected keys exactly inside the transaction, and stamps the
+  table's own version column — whatever it is called.
 - **`tables:` and `topologies:` in config — and no built-in table.** What Cachet caches is
   declared: the table, its columns and their order, the primary key, the version column, and the
   conditional-write shapes the deployment permits. A topology is a named set of shards, and tables
@@ -95,6 +102,14 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 
 ### Fixed
 
+- **The proxy refused every string-valued bound parameter.** A prepared statement's string, blob
+  and decimal arguments arrive as the MySQL type plus raw bytes rather than as a Go string, and the
+  classifier did not recognise that shape — so a table keyed by a `VARCHAR` could never be cached
+  through the proxy. Invisible until a table with a string primary key existed, because integer
+  keys arrive as integers.
+- **An empty string was written as SQL NULL.** A non-NULL value whose bytes were nil — which is how
+  an empty `bytes` field decodes — rendered as an untyped nil, and `database/sql` turns that into
+  NULL. The two are different facts, which is the reason the row encoding carries a null bitmap.
 - **A long-lived `SESSION` client never hit the cache.** Reading more than one key on a shard
   produced a miss on every read, for ever, with no writes involved — 0/5 where `EVENTUAL` got 5/5.
   Each read advanced that shard's watermark to its own fill version, so reading one key made every

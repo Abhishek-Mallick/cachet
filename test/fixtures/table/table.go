@@ -11,6 +11,7 @@ package table
 import (
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/schema"
+	"github.com/Abhishek-Mallick/cachet/internal/storage"
 )
 
 // Name is the fixture table.
@@ -58,5 +59,107 @@ func Declare(cfg config.Config) config.Config {
 	}
 	cfg.Topologies = []config.Topology{{Name: "main", Shards: ids}}
 	cfg.Tables = []config.Table{Entities()}
+	return cfg
+}
+
+// Row builds a fixture row in the descriptor's column order.
+//
+// The version is a placeholder: storage stamps its own from the shard's HLC, which is the only
+// clock allowed to issue one.
+func Row(id uint64, tenant uint32, status uint8, payload string) storage.Row {
+	return storage.Row{
+		schema.Uint(id),
+		schema.Uint(uint64(tenant)),
+		schema.Uint(uint64(status)),
+		schema.Bin([]byte(payload)),
+		schema.Uint(0),
+	}
+}
+
+// Key names a fixture row.
+func Key(id uint64) schema.Key {
+	k, err := schema.KeyOf(Name, id)
+	if err != nil {
+		panic("fixtures: the fixture key grammar no longer accepts an integer id: " + err.Error())
+	}
+	return k
+}
+
+// VersionOf reads a fixture row's version column.
+func VersionOf(row storage.Row) (storage.Version, error) {
+	v, err := row[4].Uint64()
+	if err != nil {
+		return 0, err
+	}
+	return storage.Version(v), nil
+}
+
+// ─── the second table ───────────────────────────────────────────────────────────
+
+// GadgetsName is the second fixture table.
+const GadgetsName = "gadgets"
+
+// Gadgets is the declaration matching the `gadgets` table in
+// test/fixtures/schema/entities.sql.
+//
+// Deliberately unlike the first one in every way that used to be compiled in: a STRING primary
+// key, a nullable column, a DECIMAL carried as text, and a version column that is not called
+// `version`. It is what makes "Cachet caches an arbitrary table" a claim the suite executes.
+func Gadgets() config.Table {
+	return config.Table{
+		Topology: "main",
+		TableConfig: schema.TableConfig{
+			Name:          GadgetsName,
+			PrimaryKey:    []string{"sku"},
+			VersionColumn: "row_version",
+			Columns: []schema.ColumnConfig{
+				{Name: "sku", Type: schema.String, Collation: "utf8mb4_bin"},
+				{Name: "region", Type: schema.String, Collation: "utf8mb4_bin"},
+				{Name: "price", Type: schema.Text},
+				{Name: "note", Type: schema.Text, Nullable: true},
+				{Name: "row_version", Type: schema.Uint64},
+			},
+		},
+		Predicates: []config.Predicate{{Match: []string{"region"}, Set: []string{"note"}}},
+	}
+}
+
+// GadgetsDescriptor is the second fixture table's validated shape.
+func GadgetsDescriptor() *schema.Descriptor {
+	d, err := Gadgets().Descriptor()
+	if err != nil {
+		panic("fixtures: the gadgets declaration no longer validates: " + err.Error())
+	}
+	return d
+}
+
+// GadgetRow builds a gadgets row. row_version is a placeholder; storage stamps its own.
+func GadgetRow(sku, region, price string, note *string) storage.Row {
+	noteValue := schema.Null()
+	if note != nil {
+		noteValue = schema.Str(*note)
+	}
+	return storage.Row{
+		schema.Str(sku),
+		schema.Str(region),
+		schema.Str(price),
+		noteValue,
+		schema.Uint(0),
+	}
+}
+
+// GadgetKey names a gadgets row.
+func GadgetKey(sku string) schema.Key {
+	k, err := schema.KeyOf(GadgetsName, sku)
+	if err != nil {
+		panic("fixtures: the gadgets key grammar rejected a sku: " + err.Error())
+	}
+	return k
+}
+
+// DeclareBoth puts both fixture tables on a config, on one topology holding every shard.
+func DeclareBoth(cfg config.Config) config.Config {
+	cfg = Declare(cfg)
+	cfg.Tables = append(cfg.Tables, Gadgets())
 	return cfg
 }

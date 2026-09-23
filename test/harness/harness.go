@@ -30,7 +30,6 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/engine"
 	"github.com/Abhishek-Mallick/cachet/internal/obs"
-	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 )
@@ -110,6 +109,11 @@ type CacheOptions struct {
 	// Zero takes the default; a conformance test that wants to observe degradation sets it low
 	// rather than writing a thousand rows to provoke it.
 	MaxAffectedKeys int
+
+	// BothTables declares the second fixture table alongside the first, so a test can prove the
+	// engine serves more than one. Off by default: most suites are about consistency and a second
+	// table would only be one more thing for them to route around.
+	BothTables bool
 
 	// Shards overrides the databases the engine opens. Nil takes DefaultShards.
 	//
@@ -214,9 +218,17 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		ids = append(ids, id)
 	}
 
-	router, err := storage.NewRouter(ids)
+	// The fixture table, declared and verified against the live schema exactly as a deployment's
+	// own table is. A harness that attached statements by hand would be testing a boot path no
+	// binary uses.
+	declare := table.Declare
+	if opts.BothTables {
+		declare = table.DeclareBoth
+	}
+	cfg := declare(config.Config{Shards: shardCfg})
+	tables, err := engine.OpenTables(ctx, cfg, shards)
 	if err != nil {
-		t.Fatalf("router: %v", err)
+		t.Fatalf("declare tables: %v", err)
 	}
 
 	// A private registry per cluster: suites start several engines in one process, and a shared
@@ -228,9 +240,8 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 
 	eng, err := engine.New(engine.Options{
 		Metrics:                 metrics,
-		Router:                  router,
 		Shards:                  shards,
-		Tables:                  []*schema.Descriptor{table.Descriptor()},
+		Tables:                  tables,
 		Cache:                   cacheClient,
 		MaxSessionShards:        64,
 		MaxAffectedKeys:         opts.MaxAffectedKeys,
@@ -268,6 +279,11 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		})
 	}
 	t.Cleanup(stop)
+
+	router, err := storage.NewRouter(ids)
+	if err != nil {
+		t.Fatalf("router: %v", err)
+	}
 
 	return &Cluster{
 		Addrs:  srv.Addrs(),

@@ -31,7 +31,7 @@ func liveColumns(ctx context.Context, db *sql.DB, table string) ([]LiveColumn, e
 	// DATABASE() rather than a configured schema name: the connection already chose one, and
 	// reading a different schema's metadata than the one the queries will run against is precisely
 	// the mismatch this function exists to prevent.
-	const q = `SELECT COLUMN_NAME, IS_NULLABLE
+	const q = `SELECT COLUMN_NAME, IS_NULLABLE, COALESCE(COLLATION_NAME, '')
 	           FROM INFORMATION_SCHEMA.COLUMNS
 	           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
 	           ORDER BY ORDINAL_POSITION`
@@ -44,11 +44,11 @@ func liveColumns(ctx context.Context, db *sql.DB, table string) ([]LiveColumn, e
 
 	var out []LiveColumn
 	for rows.Next() {
-		var name, nullable string
-		if err := rows.Scan(&name, &nullable); err != nil {
+		var name, nullable, collation string
+		if err := rows.Scan(&name, &nullable, &collation); err != nil {
 			return nil, fmt.Errorf("storage: reading columns of %q: %w", table, err)
 		}
-		out = append(out, LiveColumn{Name: name, Nullable: nullable == "YES"})
+		out = append(out, LiveColumn{Name: name, Nullable: nullable == "YES", Collation: collation})
 	}
 	return out, rows.Err()
 }

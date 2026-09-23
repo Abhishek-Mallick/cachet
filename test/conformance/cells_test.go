@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
-	"github.com/Abhishek-Mallick/cachet/internal/storage"
+	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
 )
 
@@ -331,7 +331,7 @@ func writeBehindTheCache(t *testing.T, e *env, key, payload string) {
 	if !ok {
 		t.Fatalf("no shard %s in the cluster", shardID)
 	}
-	if _, err := shard.Put(context.Background(), storageRecord(id, payload)); err != nil {
+	if _, err := shard.PutRow(context.Background(), table.Name, table.Row(id, 1, 0, payload)); err != nil {
 		t.Fatalf("direct shard write: %v", err)
 	}
 }
@@ -345,10 +345,4 @@ func parseID(t *testing.T, key string) uint64 {
 		t.Fatalf("parse id from %q: %v", key, err)
 	}
 	return id
-}
-
-// storageRecord builds the row for a direct shard write. Version is left zero: the shard stamps it
-// from its own HLC, which is the only clock allowed to issue one.
-func storageRecord(id uint64, payload string) storage.Record {
-	return storage.Record{ID: id, TenantID: 1, Status: 0, Payload: []byte(payload)}
 }

@@ -85,7 +85,7 @@ func run() error {
 		loaders[id] = newLoader(id, db, *batchSize)
 	}
 
-	err = Generate(profile, func(rec storage.Record) error {
+	err = Generate(profile, func(rec Record) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -173,7 +173,7 @@ type loader struct {
 	clock *storage.Clock
 	size  int
 
-	pending []storage.Record
+	pending []Record
 	rows    uint64
 	hasher  hash.Hash
 }
@@ -184,12 +184,12 @@ func newLoader(id storage.ShardID, db *sql.DB, size int) *loader {
 		db:      db,
 		clock:   storage.NewClock(time.Now),
 		size:    size,
-		pending: make([]storage.Record, 0, size),
+		pending: make([]Record, 0, size),
 		hasher:  sha256.New(),
 	}
 }
 
-func (l *loader) add(ctx context.Context, rec storage.Record) error {
+func (l *loader) add(ctx context.Context, rec Record) error {
 	HashRecord(l.hasher, rec)
 	l.pending = append(l.pending, rec)
 	if len(l.pending) >= l.size {

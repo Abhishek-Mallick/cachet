@@ -191,3 +191,52 @@ func hexVal(c byte) (byte, error) {
 		return 0, fmt.Errorf("invalid escape digit %q", c)
 	}
 }
+
+// Validate checks a key against this table's primary key columns.
+//
+// Arity and per-column type, because a key is not just a string: `entities:abc` is a well-formed
+// key for a table whose primary key is a VARCHAR and a nonsense one for a table whose primary key
+// is a BIGINT. Accepting it for the second would send a query to MySQL with a value it coerces or
+// rejects, and the caller would be told the row does not exist rather than that they asked a
+// question the table cannot answer.
+func (d *Descriptor) Validate(k Key) error {
+	if k.Table != d.Name {
+		return fmt.Errorf("schema: key %s does not name table %q", k, d.Name)
+	}
+	if len(k.Values) != len(d.PrimaryKey) {
+		return fmt.Errorf("schema: %s has %d primary key column(s), key %s has %d",
+			d.Name, len(d.PrimaryKey), k, len(k.Values))
+	}
+	for i, col := range d.PrimaryKey {
+		if err := fits(col, k.Values[i]); err != nil {
+			return fmt.Errorf("schema: key %s: %w", k, err)
+		}
+	}
+	return nil
+}
+
+// fits checks one primary key value against the column that holds it.
+//
+// An out-of-range integer is not a row anything will claim to know about: MySQL would reject or
+// truncate it, and either way the row the caller meant is not the row the key names.
+func fits(col *Column, text string) error {
+	switch col.Type {
+	case Uint8, Uint32, Uint64:
+		bits := map[Type]int{Uint8: 8, Uint32: 32, Uint64: 64}[col.Type]
+		v, err := strconv.ParseUint(text, 10, bits)
+		if err != nil || text != strconv.FormatUint(v, 10) {
+			return fmt.Errorf("%s is %s, and %q is not one", col.Name, col.Type, text)
+		}
+	case Int64:
+		v, err := strconv.ParseInt(text, 10, 64)
+		if err != nil || text != strconv.FormatInt(v, 10) {
+			return fmt.Errorf("%s is %s, and %q is not one", col.Name, col.Type, text)
+		}
+	case String, Bytes, Text:
+		// Any bytes are a legitimate value, including the empty string: '' is a permitted PRIMARY
+		// KEY value for a VARCHAR column.
+	default:
+		return fmt.Errorf("%s has type %s, which cannot be a primary key", col.Name, col.Type)
+	}
+	return nil
+}

@@ -80,6 +80,11 @@ type Column struct {
 	// Index is the column's position in the encoded row. It is part of the fingerprint, so a
 	// reordering invalidates every entry rather than decoding old bytes into new positions.
 	Index int
+
+	// Collation is carried through from the declaration so that boot can compare it against the
+	// live column. It is deliberately NOT part of the fingerprint: a collation change does not
+	// change the bytes an entry holds, it changes which rows are the same row.
+	Collation string
 }
 
 // Quoted renders the column for SQL.
@@ -145,7 +150,9 @@ func NewDescriptor(cfg TableConfig) (*Descriptor, error) {
 		if _, dup := d.byName[c.Name]; dup {
 			return nil, fmt.Errorf("schema: %s: column %q declared twice", cfg.Name, c.Name)
 		}
-		d.Columns = append(d.Columns, Column{Name: c.Name, Type: c.Type, Nullable: c.Nullable, Index: i})
+		d.Columns = append(d.Columns, Column{
+			Name: c.Name, Type: c.Type, Nullable: c.Nullable, Collation: c.Collation, Index: i,
+		})
 	}
 	for i := range d.Columns {
 		d.byName[d.Columns[i].Name] = &d.Columns[i]

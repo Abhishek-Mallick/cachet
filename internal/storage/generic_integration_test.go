@@ -67,13 +67,13 @@ func ordersShard(ctx context.Context, t *testing.T) *storage.Shard {
 	if err != nil {
 		t.Fatalf("NewTable: %v", err)
 	}
-	return sh.WithTable(tbl)
+	return sh.WithTables(tbl)
 }
 
 func TestAnArbitraryTableRoundTrips(t *testing.T) {
 	ctx := context.Background()
 	sh := ordersShard(ctx, t)
-	d := sh.Table().Descriptor()
+	d := ordersDescriptor(t)
 
 	key, err := d.Key("ORD-001")
 	if err != nil {
@@ -87,7 +87,7 @@ func TestAnArbitraryTableRoundTrips(t *testing.T) {
 		schema.Str("19.99"),
 		schema.Uint(0), // replaced by the shard
 	}
-	v, err := sh.PutRow(ctx, row)
+	v, err := sh.PutRow(ctx, "orders", row)
 	if err != nil {
 		t.Fatalf("PutRow: %v", err)
 	}
@@ -120,12 +120,12 @@ func TestAnArbitraryTableRoundTrips(t *testing.T) {
 func TestAnArbitraryTableBatchesAndDeletes(t *testing.T) {
 	ctx := context.Background()
 	sh := ordersShard(ctx, t)
-	d := sh.Table().Descriptor()
+	d := ordersDescriptor(t)
 
 	refs := []string{"ORD-b1", "ORD-b2", "ORD-b3"}
 	keys := make([]schema.Key, 0, len(refs))
 	for _, ref := range refs {
-		if _, err := sh.PutRow(ctx, storage.Row{
+		if _, err := sh.PutRow(ctx, "orders", storage.Row{
 			schema.Str(ref), schema.Str("bob"), schema.Str("note " + ref), schema.Str("1.00"), schema.Uint(0),
 		}); err != nil {
 			t.Fatalf("PutRow %s: %v", ref, err)
@@ -168,10 +168,10 @@ func TestAnArbitraryTableBatchesAndDeletes(t *testing.T) {
 func TestAStringKeyWithSeparatorsNamesOneRow(t *testing.T) {
 	ctx := context.Background()
 	sh := ordersShard(ctx, t)
-	d := sh.Table().Descriptor()
+	d := ordersDescriptor(t)
 
 	for _, ref := range []string{"a:b", "a%3Ab", "a%b", "has space", "unicode-🎯"} {
-		if _, err := sh.PutRow(ctx, storage.Row{
+		if _, err := sh.PutRow(ctx, "orders", storage.Row{
 			schema.Str(ref), schema.Str("carol"), schema.Null(), schema.Str("2.50"), schema.Uint(0),
 		}); err != nil {
 			t.Fatalf("PutRow %q: %v", ref, err)
