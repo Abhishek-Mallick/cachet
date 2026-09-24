@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -23,14 +24,17 @@ type fakeCache struct {
 	err     error
 }
 
-func (f *fakeCache) Peek(_ context.Context, key string) (uint64, bool, error) {
+func (f *fakeCache) Peek(_ context.Context, key string) (sextant.Entry, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
-		return 0, false, f.err
+		return sextant.Entry{}, false, f.err
 	}
 	v, ok := f.entries[key]
-	return v, ok, nil
+	if !ok {
+		return sextant.Entry{}, false, nil
+	}
+	return sextant.Entry{Version: v, VersionKnown: true, Value: []byte(strconv.FormatUint(v, 10))}, true, nil
 }
 
 type fakeOrigin struct {
@@ -38,11 +42,14 @@ type fakeOrigin struct {
 	rows map[string]uint64
 }
 
-func (f *fakeOrigin) Version(_ context.Context, key string) (uint64, bool, error) {
+func (f *fakeOrigin) State(_ context.Context, key string) (sextant.State, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	v, ok := f.rows[key]
-	return v, ok, nil
+	if !ok {
+		return sextant.State{}, false, nil
+	}
+	return sextant.State{Version: v, VersionKnown: true, Value: []byte(strconv.FormatUint(v, 10))}, true, nil
 }
 
 func (f *fakeOrigin) Shard(string) (string, error) { return "shard0", nil }

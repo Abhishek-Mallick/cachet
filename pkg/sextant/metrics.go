@@ -22,12 +22,15 @@ import (
 // has to publish the same series with the same meaning — otherwise the number cannot be compared
 // with anybody else's, and a consistency figure that is not comparable is decoration.
 func RegisterMetrics(reg prometheus.Registerer, slo *SLO, v *Verifier) error {
-	tier := prometheus.Labels{"tier": string(v.Tier())}
+	// Tier and key source both travel on every series. They answer two different questions an
+	// operator has to be able to ask of a number: what comparison produced it, and over which
+	// population.
+	common := prometheus.Labels{"tier": string(v.Tier()), "keys": string(v.KeySourceKind())}
 
 	if err := reg.Register(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Namespace: "cachet", Subsystem: "sextant", Name: "shadow_mode",
 		Help:        "1 when observing a deployment that serves no application traffic.",
-		ConstLabels: tier,
+		ConstLabels: common,
 	}, func() float64 {
 		if v.Shadow() {
 			return 1
@@ -39,7 +42,9 @@ func RegisterMetrics(reg prometheus.Registerer, slo *SLO, v *Verifier) error {
 
 	for _, level := range v.Levels() {
 		l := level
-		labels := prometheus.Labels{"level": l.String(), "tier": string(v.Tier())}
+		labels := prometheus.Labels{
+			"level": l.String(), "tier": string(v.Tier()), "keys": string(v.KeySourceKind()),
+		}
 
 		// Nines are gauged rather than the raw fraction, because that is how this gets discussed —
 		// and because a fraction rounded for display hides the difference between 0.999 and 0.99999

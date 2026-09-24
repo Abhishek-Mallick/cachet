@@ -13,6 +13,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/cache"
 	"github.com/Abhishek-Mallick/cachet/internal/schema"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
+	"github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
 // The adapters that point the verifier at THIS deployment — Cachet's own cache client and its
@@ -30,21 +31,21 @@ type CacheAdapter struct{ client *cache.Client }
 // NewCacheAdapter wraps a cache client for read-only verification.
 func NewCacheAdapter(c *cache.Client) *CacheAdapter { return &CacheAdapter{client: c} }
 
-// Peek returns the fill version of a cached entry.
+// Peek returns what the cache holds for a key.
 //
 // The FILL version, not the row version, because the question is "how stale is the database
 // snapshot behind this entry" — which is the question the guarantee is written in terms of
 // (CONSISTENCY.md §1). Comparing row versions would ask a different question and answer it
 // confidently.
-func (a *CacheAdapter) Peek(ctx context.Context, key string) (uint64, bool, error) {
+func (a *CacheAdapter) Peek(ctx context.Context, key string) (sextant.Entry, bool, error) {
 	entry, hit, err := a.client.Get(ctx, key)
 	if err != nil {
-		return 0, false, err
+		return sextant.Entry{}, false, err
 	}
 	if !hit {
-		return 0, false, nil
+		return sextant.Entry{}, false, nil
 	}
-	return entry.FillVersion, true, nil
+	return sextant.Entry{Version: entry.FillVersion, VersionKnown: true, Value: entry.Row}, true, nil
 }
 
 // OriginAdapter reads row versions from the sharded database.
@@ -58,42 +59,49 @@ func NewOriginAdapter(router *storage.Router, shards map[storage.ShardID]*storag
 	return &OriginAdapter{router: router, shards: shards}
 }
 
-// Version returns a row's current version.
+// State returns a row's current version and its encoded form.
 //
 // Read through the shard's declared table rather than a statement written here, so the verifier
 // reads the same columns the engine caches. A second way to read the origin is a second thing that
 // can be wrong about what the origin holds, which is the one thing a verifier must not be.
-func (a *OriginAdapter) Version(ctx context.Context, key string) (uint64, bool, error) {
+func (a *OriginAdapter) State(ctx context.Context, key string) (sextant.State, bool, error) {
 	parsed, err := schema.ParseKey(key)
 	if err != nil {
-		return 0, false, fmt.Errorf("sextant: parse key %q: %w", key, err)
+		return sextant.State{}, false, fmt.Errorf("sextant: parse key %q: %w", key, err)
 	}
 	shardID, err := a.router.ShardFor(key)
 	if err != nil {
-		return 0, false, fmt.Errorf("sextant: route %s: %w", key, err)
+		return sextant.State{}, false, fmt.Errorf("sextant: route %s: %w", key, err)
 	}
 	shard, ok := a.shards[shardID]
 	if !ok {
-		return 0, false, fmt.Errorf("sextant: no open shard %s", shardID)
+		return sextant.State{}, false, fmt.Errorf("sextant: no open shard %s", shardID)
 	}
 
 	row, _, err := shard.GetRow(ctx, parsed)
 	if errors.Is(err, storage.ErrNotFound) {
-		return 0, false, nil
+		return sextant.State{}, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("sextant: read %s: %w", key, err)
+		return sextant.State{}, false, fmt.Errorf("sextant: read %s: %w", key, err)
 	}
 
 	t, err := shard.Table(parsed.Table)
 	if err != nil {
-		return 0, false, fmt.Errorf("sextant: %w", err)
+		return sextant.State{}, false, fmt.Errorf("sextant: %w", err)
 	}
 	version, err := row[t.Descriptor().VersionColumn.Index].Uint64()
 	if err != nil {
-		return 0, false, fmt.Errorf("sextant: read %s: %w", key, err)
+		return sextant.State{}, false, fmt.Errorf("sextant: read %s: %w", key, err)
 	}
-	return version, true, nil
+
+	// The encoded row goes with it, so a Cachet deployment can also be checked at the value tier —
+	// which is how the value comparison gets exercised against a system whose answer is known.
+	encoded, err := t.Descriptor().EncodeRow(row)
+	if err != nil {
+		return sextant.State{}, false, fmt.Errorf("sextant: encode %s: %w", key, err)
+	}
+	return sextant.State{Version: version, VersionKnown: true, Value: encoded}, true, nil
 }
 
 // Shard names the shard a key belongs to.

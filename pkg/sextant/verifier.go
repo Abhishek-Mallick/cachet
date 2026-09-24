@@ -1,6 +1,7 @@
 package sextant
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,17 +18,43 @@ import (
 // write to the cache it is checking would be able to influence the thing it reports on. Whatever
 // Sextant says about consistency has to be an observation, never a side effect.
 type CacheReader interface {
-	// Peek returns the fill version of a cached entry, and whether one is present.
-	Peek(ctx context.Context, key string) (fillVersion uint64, present bool, err error)
+	// Peek returns what the cache holds for a key, and whether it holds anything.
+	Peek(ctx context.Context, key string) (Entry, bool, error)
 }
 
-// OriginReader is the part of the database Sextant needs.
+// Entry is what a cache holds for a key, as much of it as the adapter can see.
+//
+// Both fields are optional and a tier decides which one matters: the Cachet and version tiers read
+// Version, the value tier reads Value. An adapter fills what it can and says so, rather than
+// returning a zero that a comparison would treat as a version.
+type Entry struct {
+	// Version is the database state this entry was filled from.
+	Version      uint64
+	VersionKnown bool
+
+	// Value is the cached bytes, for a comparison that has nothing better.
+	Value []byte
+}
+
+// OriginReader is the part of the system of record Sextant needs.
 type OriginReader interface {
-	// Version returns the row's current version, and whether the row exists.
-	Version(ctx context.Context, key string) (version uint64, exists bool, err error)
+	// State returns what the origin currently holds for a key, and whether the row exists.
+	State(ctx context.Context, key string) (State, bool, error)
 
 	// Shard names the shard a key belongs to, for attribution.
 	Shard(key string) (string, error)
+}
+
+// State is the origin's current state for one key.
+type State struct {
+	// Version is the row's version now.
+	Version      uint64
+	VersionKnown bool
+
+	// Value is the projection of the row that a value-tier comparison compares against. It must be
+	// produced the same way the application produces what it caches, or every entry looks stale —
+	// which is a configuration error that presents as a permanent violation, and is meant to.
+	Value []byte
 }
 
 // KeySource supplies the keys to check.
@@ -193,11 +220,11 @@ func (v *Verifier) RunOnce(ctx context.Context) Stats {
 }
 
 func (v *Verifier) check(ctx context.Context, key string, round *Stats) error {
-	dbVersion, exists, err := v.opts.Origin.Version(ctx, key)
+	state, exists, err := v.opts.Origin.State(ctx, key)
 	if err != nil {
 		return fmt.Errorf("origin: %w", err)
 	}
-	fillVersion, present, err := v.opts.Cache.Peek(ctx, key)
+	entry, present, err := v.opts.Cache.Peek(ctx, key)
 	if err != nil {
 		return fmt.Errorf("cache: %w", err)
 	}
@@ -212,7 +239,10 @@ func (v *Verifier) check(ctx context.Context, key string, round *Stats) error {
 	round.Checked++
 	now := v.now()
 
-	diff := VersionDifference(fillVersion, dbVersion)
+	diff, err := v.compare(entry, state)
+	if err != nil {
+		return err
+	}
 	if !diff.Behind {
 		// Caught up — including the case where the entry is ahead, which happens when the cache was
 		// read after a write landed and the database before it.
@@ -254,6 +284,28 @@ func (v *Verifier) check(ctx context.Context, key string, round *Stats) error {
 	return nil
 }
 
+// compare produces the difference this verifier's tier is able to state.
+//
+// An adapter that cannot supply what the tier needs is a configuration error, and it is reported as
+// one rather than silently degraded: a run that quietly fell back to comparing values would keep
+// exporting SESSION and BOUNDED series that nothing was measuring.
+func (v *Verifier) compare(entry Entry, state State) (Difference, error) {
+	if v.opts.Tier.ComparesVersions() {
+		if !entry.VersionKnown || !state.VersionKnown {
+			return Difference{}, fmt.Errorf(
+				"sextant: tier %q compares versions, but the cache adapter supplied one=%t and the origin one=%t",
+				v.opts.Tier, entry.VersionKnown, state.VersionKnown)
+		}
+		return VersionDifference(entry.Version, state.Version), nil
+	}
+	if entry.Value == nil || state.Value == nil {
+		return Difference{}, fmt.Errorf(
+			"sextant: tier %q compares values, but the cache adapter supplied one=%t and the origin one=%t",
+			v.opts.Tier, entry.Value != nil, state.Value != nil)
+	}
+	return ValueDifference(bytes.Equal(entry.Value, state.Value)), nil
+}
+
 // observeClean records one clean observation against every level that reads the cache.
 func (v *Verifier) observeClean(now time.Time) {
 	for _, level := range v.Levels() {
@@ -291,6 +343,25 @@ func (v *Verifier) Stats() Stats {
 
 // Tier is how this verifier compares entries against the origin.
 func (v *Verifier) Tier() Tier { return v.opts.Tier }
+
+// KeySourceKind names where this verifier's keys come from, for the metric label.
+//
+// A run sampled from the cache's own keyspace and a run sampled from replication are not measuring
+// the same population, and a consistency figure that does not say which cannot be compared with
+// anybody else's.
+func (v *Verifier) KeySourceKind() KeySourceKind {
+	if d, ok := v.opts.Keys.(DescribedKeySource); ok {
+		return d.Kind()
+	}
+	return "unknown"
+}
+
+// KeySourceDegraded reports whether the key source systematically under-samples the case a stale
+// entry lives in.
+func (v *Verifier) KeySourceDegraded() bool {
+	d, ok := v.opts.Keys.(DescribedKeySource)
+	return ok && d.Degraded()
+}
 
 // Levels reports which consistency levels this verifier can evaluate at all.
 //
