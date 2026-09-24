@@ -17,6 +17,8 @@
   &nbsp;·&nbsp;
   <a href="./CONSISTENCY.md">Consistency model</a>
   &nbsp;·&nbsp;
+  <a href="./documentation/SEXTANT.md">Sextant</a>
+  &nbsp;·&nbsp;
   <a href="#benchmarks">Benchmarks</a>
 </p>
 
@@ -118,6 +120,13 @@ and a verifier.
 
 Run it in **shadow mode** first — pointed at a deployment your application is not reading through,
 it reports what your consistency *would have been*, with no code change and no risk.
+
+**It works on caches that are not Cachet's.** Point it at a Redis and the database behind it and it
+publishes the same per-level figure, with the comparison it managed to make as a label — so a run
+that could only compare values can never be read as a claim about bounded staleness. It installs on
+its own (`brew install sextant`), and its measured false-positive rate against a *correct* cache
+under load is published in [`FALSE-POSITIVES.md`](./FALSE-POSITIVES.md).
+[More →](./documentation/SEXTANT.md)
 
 ## Architecture
 

@@ -93,6 +93,12 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 
 - **Sextant**: consistency tracing, violation detection, and a per-level SLO published as a number.
   Every violation carries the trace that explains it.
+- **Sextant verifies caches that are not Cachet's.** Published as `pkg/sextant`, configured by its
+  own `sextant.yaml`, installable on its own — point it at a Redis and the database behind it. It
+  states which comparison it made as a metric label, and a tier that cannot order an entry against
+  the database does not export `SESSION` or `BOUNDED` at all rather than reporting zero violations
+  for a level nothing measured. Its false-positive rate against a correct cache under write burst is
+  measured and published: [`FALSE-POSITIVES.md`](./FALSE-POSITIVES.md).
 - **Shadow mode**: measure what your consistency *would have been*, against traffic Cachet does not
   serve, without changing a line of application code.
 - **Conformance suite**: every level's guarantee and documented non-guarantee as a cell, including

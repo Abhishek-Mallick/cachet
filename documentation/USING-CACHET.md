@@ -473,9 +473,13 @@ is worse than one that admits it cannot answer yet.
 ## Verifying your consistency — `sextant`
 
 ```bash
-sextant -config cachet.yaml            # verify a live deployment
-sextant -config cachet.yaml -shadow    # observe only: what consistency WOULD have been
+sextant -cachet-config cachet.yaml            # verify a live deployment
+sextant -cachet-config cachet.yaml -shadow    # observe only: what consistency WOULD have been
 ```
+
+**Sextant also works on caches that are not Cachet's.** Point it at a Redis and the database behind
+it with its own `sextant.yaml` and it publishes the same figure — see
+[SEXTANT.md](./SEXTANT.md). It is installable on its own: `brew install sextant`.
 
 **Start with `-shadow`.** It runs the same detection and tracing loops against a deployment your
 application is not reading through, so you get a number for your own traffic without changing a line
@@ -486,10 +490,15 @@ It exports per consistency level, on `observability.metrics_listen`:
 
 | Metric | Meaning |
 |---|---|
-| `cachet_sextant_consistency_nines{level}` | Measured consistency, in nines |
-| `cachet_sextant_observations{level}` | Evidence count. **Zero means the figure above is not a measurement** |
-| `cachet_sextant_violations{level}` | Violations in the current window |
-| `cachet_sextant_shadow_mode` | 1 when observing a deployment serving no traffic |
+| `cachet_sextant_consistency_nines{level,tier,keys}` | Measured consistency, in nines |
+| `cachet_sextant_observations{level,tier,keys}` | Evidence count. **Zero means the figure above is not a measurement** |
+| `cachet_sextant_violations{level,tier,keys}` | Violations in the current window |
+| `cachet_sextant_key_source_degraded{tier,keys}` | 1 when the key source under-samples the case a stale entry lives in |
+| `cachet_sextant_shadow_mode{tier,keys}` | 1 when observing a deployment serving no traffic |
+
+`tier` says which comparison produced the number, and it is not decoration: a run that could only
+compare values cannot evaluate `SESSION` or `BOUNDED(t)`, and does not export them at all rather
+than exporting zero violations for a level nothing measured.
 
 Read the observation count beside the nines. A verifier that has looked at nothing is not at 100%;
 it has no evidence, and the two must not look the same on a dashboard.
