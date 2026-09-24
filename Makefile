@@ -106,6 +106,10 @@ test-consistency: ## The conformance suite. THE gate that matters.
 test-e2e: ## Full-stack scenarios against test/env
 	$(GOTEST) -tags=e2e -timeout=30m ./test/e2e/...
 
+.PHONY: test-verifier
+test-verifier: ## Sextant against plain Redis + MySQL: broken writers must be caught, a correct one must not
+	$(GOTEST) -tags=e2e -timeout=20m ./test/verifier/...
+
 .PHONY: test-chaos
 test-chaos: ## The injected faults (needs env-chaos-up)
 	$(GOTEST) -tags=chaos -timeout=45m ./test/chaos/...
