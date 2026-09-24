@@ -177,12 +177,14 @@ func (s *Shard) PutRow(ctx context.Context, table string, row Row) (v Version, e
 
 	// The VALUES list takes every column; the assignment list takes every column the statement
 	// actually reassigns, which excludes the primary key it matched on.
+	// Bound per COLUMN, not per value: the column's type decides whether the driver is handed a
+	// string or bytes, and MySQL refuses to build a JSON value out of bytes.
 	args := make([]any, 0, 2*len(stamped))
-	for _, val := range stamped {
-		args = append(args, val.SQL())
+	for i, val := range stamped {
+		args = append(args, t.d.Columns[i].Arg(val))
 	}
 	for _, i := range t.UpsertAssignedColumns() {
-		args = append(args, stamped[i].SQL())
+		args = append(args, t.d.Columns[i].Arg(stamped[i]))
 	}
 
 	// INSERT ... ON DUPLICATE KEY UPDATE rather than an INSERT-or-UPDATE decision: the row may

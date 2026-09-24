@@ -143,9 +143,26 @@ var matrix = []cell{
 	},
 }
 
-// TestConformanceMatrix executes every cell on the shipped configuration.
+// fixtures is what the matrix runs over.
+//
+// The first is the shipped configuration and must stay: a matrix that stopped executing cachet.v1
+// would stop covering the protocol most existing clients speak. The rest are what turn "the
+// guarantees hold" from a claim about one five-column table into a claim about Cachet — the last
+// one has a string primary key with separators in it, a nullable column, a DECIMAL, and a version
+// column called row_version.
+func fixtures() []fixture {
+	return []fixture{entitiesV1{}, entitiesV2Fixture(), gadgetsV2Fixture()}
+}
+
+// TestConformanceMatrix executes every cell against every fixture.
 func TestConformanceMatrix(t *testing.T) {
-	env := newEnv(t, config{synchronousInvalidation: true})
+	for _, fx := range fixtures() {
+		t.Run(fx.Name(), func(t *testing.T) { runMatrix(t, fx) })
+	}
+}
+
+func runMatrix(t *testing.T, fx fixture) {
+	env := newEnvFor(t, config{synchronousInvalidation: true}, fx)
 
 	for _, c := range matrix {
 		for i, lv := range levels {
@@ -189,7 +206,13 @@ func TestConformanceMatrix(t *testing.T) {
 // the session watermark, and claiming it should break here would be inventing a failure to look
 // thorough.
 func TestTheSuiteDetectsAViolation(t *testing.T) {
-	env := newEnv(t, config{synchronousInvalidation: false})
+	for _, fx := range fixtures() {
+		t.Run(fx.Name(), func(t *testing.T) { runViolationDetection(t, fx) })
+	}
+}
+
+func runViolationDetection(t *testing.T, fx fixture) {
+	env := newEnvFor(t, config{synchronousInvalidation: false}, fx)
 
 	// With no invalidation, another session's write never becomes visible through a cached entry:
 	// the entry simply sits there until its TTL. STRONG is excluded because it bypasses the cache
@@ -252,11 +275,20 @@ type env struct {
 	client  cachetv1.CacheServiceClient
 	cfg     config
 
+	// fx is the table this env's cells run against, and the protocol they reach it through.
+	fx fixture
+
 	mu   sync.Mutex
 	next uint64
 }
 
+// newEnv brings up an env against the shipped configuration: the fixture table over cachet.v1.
 func newEnv(t *testing.T, cfg config) *env {
+	t.Helper()
+	return newEnvFor(t, cfg, entitiesV1{})
+}
+
+func newEnvFor(t *testing.T, cfg config, fx fixture) *env {
 	t.Helper()
 
 	ctx := context.Background()
@@ -264,12 +296,14 @@ func newEnv(t *testing.T, cfg config) *env {
 		TTL:                     time.Hour,
 		SynchronousInvalidation: cfg.synchronousInvalidation,
 		MaxAffectedKeys:         cfg.maxAffectedKeys,
+		BothTables:              fx.BothTables(),
 	}, "tcp://127.0.0.1:0")
 
 	return &env{
 		cluster: cluster,
 		client:  cluster.Client(t, cluster.Addrs[0]),
 		cfg:     cfg,
+		fx:      fx,
 		next:    nextIDRange(),
 	}
 }
@@ -325,12 +359,12 @@ func randomRunBase() uint64 {
 	return binary.LittleEndian.Uint64(b[:]) % (idSpace / idsPerEnv) * idsPerEnv
 }
 
-// key returns an id no other cell in this run, and no other env in this process, will touch.
+// key returns a key no other cell in this run, and no other env in this process, will touch.
 func (e *env) key() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.next++
-	return fmt.Sprintf("entities:%d", idBase+e.next)
+	return e.fx.Key(e.next)
 }
 
 // get reads at a level, carrying a session token.

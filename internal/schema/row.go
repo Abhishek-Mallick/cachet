@@ -68,8 +68,13 @@ func (v Value) Uint64() (uint64, error) {
 	return u, nil
 }
 
-// SQL renders the value as a query argument. NULL becomes an untyped nil, which the driver sends
-// as SQL NULL; everything else goes as the bytes MySQL gave us.
+// SQL renders the value as a query argument for a column of unknown type.
+//
+// Prefer Column.Arg, which knows the column and can hand the driver a string where MySQL requires
+// one. This remains for the places that bind a value without a column in hand.
+//
+// NULL becomes an untyped nil, which the driver sends as SQL NULL; everything else goes as the
+// bytes MySQL gave us.
 //
 // A non-NULL value whose Bytes are nil is sent as an EMPTY slice, not as the nil it holds. A nil
 // []byte reaching database/sql is converted to SQL NULL, so returning it here would write NULL for
@@ -89,6 +94,27 @@ func (v Value) SQL() any {
 func (v Value) String() string {
 	if v.IsNull {
 		return "NULL"
+	}
+	return string(v.Bytes)
+}
+
+// Arg renders a value as a query argument for THIS column.
+//
+// The column's type decides whether the driver is handed a string or a byte slice, and the
+// difference is not cosmetic: a []byte is sent with character set `binary`, and MySQL refuses to
+// build a JSON value from one — "Cannot create a JSON value from a string with CHARACTER SET
+// 'binary'". A DECIMAL or DATETIME written the same way is coerced rather than refused, which is
+// worse. Only a genuinely binary column wants bytes.
+func (c *Column) Arg(v Value) any {
+	if v.IsNull {
+		return nil
+	}
+	if c.Type == Bytes {
+		if v.Bytes == nil {
+			// Never a nil slice: database/sql converts one to SQL NULL, and this value is not.
+			return []byte{}
+		}
+		return v.Bytes
 	}
 	return string(v.Bytes)
 }

@@ -12,7 +12,6 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
-	"github.com/Abhishek-Mallick/cachet/test/fixtures/table"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
 )
 
@@ -26,20 +25,26 @@ import (
 
 func durationProto(d time.Duration) *durationpb.Duration { return durationpb.New(d) }
 
+// eventually is the warming read every cell takes before the one under test.
+//
+// EVENTUAL because warming must not itself carry a guarantee: a warming read at SESSION would
+// advance the watermark and change what the cell then measures.
+var eventually = levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}
+
 // readOwnPointWrite: a session that wrote k must see that write or a later one.
 func readOwnPointWrite(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
-	put(t, e, key, "v1", nil)
+	e.fx.Put(t, e, key, "v1", nil)
 	// Warm the cache so the read has something stale to be fooled by. Without this the read would
 	// miss and go to the database, and the cell would pass without ever exercising the guarantee.
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	e.fx.Get(t, e, key, eventually, nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
-	w := put(t, e, key, "v2", nil)
-	resp := get(t, e, key, lv, w.GetSession())
+	w := e.fx.Put(t, e, key, "v2", nil)
+	resp := e.fx.Get(t, e, key, lv, w.Session)
 
-	return resp.GetFound() && string(resp.GetRecord().GetPayload()) == "v2"
+	return resp.Found && resp.Payload == "v2"
 }
 
 // readOwnInsertOverNegative: an insert must be visible to its writer even when the key's absence was
@@ -48,32 +53,29 @@ func readOwnInsertOverNegative(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
 	// Cache the absence.
-	if resp := get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil); resp.GetFound() {
+	if resp := e.fx.Get(t, e, key, eventually, nil); resp.Found {
 		t.Fatalf("fixture: %s already exists", key)
 	}
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
-	w := put(t, e, key, "inserted", nil)
-	resp := get(t, e, key, lv, w.GetSession())
+	w := e.fx.Put(t, e, key, "inserted", nil)
+	resp := e.fx.Get(t, e, key, lv, w.Session)
 
-	return resp.GetFound() && string(resp.GetRecord().GetPayload()) == "inserted"
+	return resp.Found && resp.Payload == "inserted"
 }
 
 // readOwnDelete: the read must return "not found", never the old value.
 func readOwnDelete(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
-	put(t, e, key, "doomed", nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	e.fx.Put(t, e, key, "doomed", nil)
+	e.fx.Get(t, e, key, eventually, nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
-	del, err := e.client.Delete(context.Background(), &cachetv1.DeleteRequest{Key: key})
-	if err != nil {
-		t.Fatalf("Delete %s: %v", key, err)
-	}
+	del := e.fx.Delete(t, e, key, nil)
 
-	resp := get(t, e, key, lv, del.GetSession())
-	return !resp.GetFound()
+	resp := e.fx.Get(t, e, key, lv, del.Session)
+	return !resp.Found
 }
 
 // readAnotherSessionImmediately: a DIFFERENT session, carrying no knowledge of the write, reads
@@ -86,15 +88,15 @@ func readOwnDelete(t *testing.T, e *env, lv levelSpec) bool {
 func readAnotherSessionImmediately(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
-	put(t, e, key, "v1", nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	e.fx.Put(t, e, key, "v1", nil)
+	e.fx.Get(t, e, key, eventually, nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
-	put(t, e, key, "v2", nil)
+	e.fx.Put(t, e, key, "v2", nil)
 
 	// A fresh session: no token, so nothing but invalidation can make the new value visible.
-	resp := get(t, e, key, lv, nil)
-	return resp.GetFound() && string(resp.GetRecord().GetPayload()) == "v2"
+	resp := e.fx.Get(t, e, key, lv, nil)
+	return resp.Found && resp.Payload == "v2"
 }
 
 // readAnotherSessionAfterP: the same, but after the propagation bound has elapsed.
@@ -104,18 +106,18 @@ func readAnotherSessionImmediately(t *testing.T, e *env, lv levelSpec) bool {
 func readAnotherSessionAfterP(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
-	put(t, e, key, "v1", nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	e.fx.Put(t, e, key, "v1", nil)
+	e.fx.Get(t, e, key, eventually, nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
-	put(t, e, key, "v2", nil)
+	e.fx.Put(t, e, key, "v2", nil)
 
 	// Poll for the propagation bound rather than sleeping it out, so a system that converges in a
 	// millisecond is not charged two seconds of test time for it.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		resp := get(t, e, key, lv, nil)
-		if resp.GetFound() && string(resp.GetRecord().GetPayload()) == "v2" {
+		resp := e.fx.Get(t, e, key, lv, nil)
+		if resp.Found && resp.Payload == "v2" {
 			return true
 		}
 		if time.Now().After(deadline) {
@@ -131,7 +133,7 @@ func readAnotherSessionAfterP(t *testing.T, e *env, lv levelSpec) bool {
 // show it.
 func monotonicReads(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
-	put(t, e, key, "v0", nil)
+	e.fx.Put(t, e, key, "v0", nil)
 
 	var (
 		wg      sync.WaitGroup
@@ -149,20 +151,20 @@ func monotonicReads(t *testing.T, e *env, lv levelSpec) bool {
 				return
 			default:
 			}
-			put(t, e, key, fmt.Sprintf("w%d", i), nil)
+			e.fx.Put(t, e, key, fmt.Sprintf("w%d", i), nil)
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
 
 	// One session, reading repeatedly and carrying its token forward. The watermark it accumulates
 	// is what must stop it ever seeing an older version than one it has already been shown.
-	var token *cachetv1.SessionToken
+	var token session
 	var last uint64
 	for i := 0; i < 40; i++ {
-		resp := get(t, e, key, lv, token)
-		token = resp.GetSession()
+		resp := e.fx.Get(t, e, key, lv, token)
+		token = resp.Session
 
-		if v := resp.GetMeta().GetRowVersion(); v < last {
+		if v := resp.RowVersion; v < last {
 			mu.Lock()
 			monoton = false
 			mu.Unlock()
@@ -188,33 +190,33 @@ func monotonicReads(t *testing.T, e *env, lv levelSpec) bool {
 func stalenessBounded(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
-	put(t, e, key, "v1", nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	e.fx.Put(t, e, key, "v1", nil)
+	e.fx.Get(t, e, key, eventually, nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
 	// A write that bypasses cache invalidation entirely, straight to the shard, so the cached entry
 	// is genuinely stale rather than merely old.
-	writeBehindTheCache(t, e, key, "v2")
+	e.fx.WriteBehindTheCache(t, e, key, "v2")
 
 	if lv.bound == 0 {
 		// Not a BOUNDED read: whatever comes back, there is no bound to have honoured.
-		resp := get(t, e, key, lv, nil)
-		return resp.GetFound() && string(resp.GetRecord().GetPayload()) == "v2"
+		resp := e.fx.Get(t, e, key, lv, nil)
+		return resp.Found && resp.Payload == "v2"
 	}
 
 	// Wait past the bound. After it, the entry's fill version is older than T−t and must be refused.
 	time.Sleep(lv.bound + 500*time.Millisecond)
 
-	resp := get(t, e, key, lv, nil)
-	return resp.GetFound() && string(resp.GetRecord().GetPayload()) == "v2"
+	resp := e.fx.Get(t, e, key, lv, nil)
+	return resp.Found && resp.Payload == "v2"
 }
 
 // survivesCacheFlush: losing every cache entry must be a correctness non-event.
 func survivesCacheFlush(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
-	w := put(t, e, key, "v1", nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	w := e.fx.Put(t, e, key, "v1", nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
 	// The cache is configured with no persistence precisely so this is survivable. If a flush could
 	// lose a guarantee, the cache would be a source of truth, which it must never become.
@@ -222,8 +224,8 @@ func survivesCacheFlush(t *testing.T, e *env, lv levelSpec) bool {
 		t.Fatalf("flush: %v", err)
 	}
 
-	resp := get(t, e, key, lv, w.GetSession())
-	return resp.GetFound() && string(resp.GetRecord().GetPayload()) == "v1"
+	resp := e.fx.Get(t, e, key, lv, w.Session)
+	return resp.Found && resp.Payload == "v1"
 }
 
 // survivesEngineFailover: the session guarantee must survive the engine that served the write.
@@ -234,8 +236,8 @@ func survivesCacheFlush(t *testing.T, e *env, lv levelSpec) bool {
 func survivesEngineFailover(t *testing.T, e *env, lv levelSpec) bool {
 	key := e.key()
 
-	w := put(t, e, key, "v1", nil)
-	get(t, e, key, levelSpec{level: cachetv1.ConsistencyLevel_CONSISTENCY_LEVEL_EVENTUAL}, nil)
+	w := e.fx.Put(t, e, key, "v1", nil)
+	e.fx.Get(t, e, key, eventually, nil)
 
 	// A second engine, sharing the cache and shards, that has never seen this session. The cache is
 	// preserved rather than flushed: flushing would erase the state under test and let the new
@@ -245,19 +247,11 @@ func survivesEngineFailover(t *testing.T, e *env, lv levelSpec) bool {
 		TTL:                     time.Hour,
 		SynchronousInvalidation: e.cfg.synchronousInvalidation,
 		PreserveCache:           true,
+		BothTables:              e.fx.BothTables(),
 	}, "tcp://127.0.0.1:0")
-	oc := other.Client(t, other.Addrs[0])
 
-	req := &cachetv1.GetRequest{Key: key, Level: lv.level, Session: w.GetSession()}
-	if lv.bound > 0 {
-		req.StalenessBound = durationProto(lv.bound)
-	}
-	resp, err := oc.Get(ctx, req)
-	if err != nil {
-		t.Fatalf("Get on the failover engine: %v", err)
-	}
-
-	return resp.GetFound() && string(resp.GetRecord().GetPayload()) == "v1"
+	resp := e.fx.GetOn(t, other, key, lv, w.Session)
+	return resp.Found && resp.Payload == "v1"
 }
 
 // crossKeySnapshot: two keys read in one BatchGet must NOT be guaranteed to reflect the same instant.
@@ -268,8 +262,8 @@ func survivesEngineFailover(t *testing.T, e *env, lv levelSpec) bool {
 func crossKeySnapshot(t *testing.T, e *env, lv levelSpec) bool {
 	a, b := e.key(), e.key()
 
-	put(t, e, a, "0", nil)
-	put(t, e, b, "0", nil)
+	e.fx.Put(t, e, a, "0", nil)
+	e.fx.Put(t, e, b, "0", nil)
 
 	// A writer advancing both keys in lockstep. Under a real snapshot, every batch read would show
 	// the two keys agreeing. Under Cachet they are N independent reads and will diverge.
@@ -285,24 +279,17 @@ func crossKeySnapshot(t *testing.T, e *env, lv levelSpec) bool {
 			default:
 			}
 			v := fmt.Sprintf("%d", i)
-			put(t, e, a, v, nil)
-			put(t, e, b, v, nil)
+			e.fx.Put(t, e, a, v, nil)
+			e.fx.Put(t, e, b, v, nil)
 		}
 	}()
 
 	diverged := false
 	for i := 0; i < 200 && !diverged; i++ {
-		req := &cachetv1.BatchGetRequest{Keys: []string{a, b}, Level: lv.level}
-		if lv.bound > 0 {
-			req.StalenessBound = durationProto(lv.bound)
-		}
-		resp, err := e.client.BatchGet(context.Background(), req)
-		if err != nil {
-			t.Fatalf("BatchGet: %v", err)
-		}
-		ra, oka := resp.GetRecords()[a]
-		rb, okb := resp.GetRecords()[b]
-		if oka && okb && string(ra.GetPayload()) != string(rb.GetPayload()) {
+		got := e.fx.BatchPayloads(t, e, []string{a, b}, lv)
+		ra, oka := got[a]
+		rb, okb := got[b]
+		if oka && okb && ra != rb {
 			diverged = true
 		}
 	}
@@ -312,37 +299,4 @@ func crossKeySnapshot(t *testing.T, e *env, lv levelSpec) bool {
 
 	// "held" means a snapshot appeared to hold, which is what the matrix marks ❌.
 	return !diverged
-}
-
-// writeBehindTheCache commits straight to the shard, so no invalidation of any kind runs.
-//
-// It exists for the staleness cell, which needs an entry that is genuinely out of date rather than
-// merely old. Going through the engine would tombstone the entry and there would be nothing stale
-// left to bound.
-func writeBehindTheCache(t *testing.T, e *env, key, payload string) {
-	t.Helper()
-
-	id := parseID(t, key)
-	shardID, err := e.cluster.Router.ShardFor(key)
-	if err != nil {
-		t.Fatalf("route %s: %v", key, err)
-	}
-	shard, ok := e.cluster.Shards[shardID]
-	if !ok {
-		t.Fatalf("no shard %s in the cluster", shardID)
-	}
-	if _, err := shard.PutRow(context.Background(), table.Name, table.Row(id, 1, 0, payload)); err != nil {
-		t.Fatalf("direct shard write: %v", err)
-	}
-}
-
-// parseID extracts the numeric id from "entities:<id>".
-func parseID(t *testing.T, key string) uint64 {
-	t.Helper()
-
-	var id uint64
-	if _, err := fmt.Sscanf(key, "entities:%d", &id); err != nil {
-		t.Fatalf("parse id from %q: %v", key, err)
-	}
-	return id
 }

@@ -55,6 +55,14 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 - **Generic rows on the wire, over a protocol the server describes.** The SDK gains `GetRow`,
   `BatchGetRows` and `PutRow` against table descriptors it learns at the handshake, rather than
   against a schema you configure it with a second copy of.
+- **Any column type Cachet carries, proven end to end.** DECIMAL, DATETIME, TIMESTAMP and JSON are
+  carried as the text MySQL produced — a round trip through `time.Time` loses the distinction
+  between what was stored and what a driver chose to format, and DECIMAL through `float64` loses
+  money. `parseTime` is forced off on every connection whatever your DSN says, because a cached
+  DATETIME rendered by the driver is a string the database would never produce.
+- **Composite primary keys** round-trip on reads, writes and deletes. Batching and conditional
+  writes on them are refused rather than half-supported: `WHERE (a,b) IN ((?,?),…)` is a row
+  constructor MyRocks plans differently.
 - **One engine serves several declared tables.** Each is routed over the shards its topology names,
   because routing comes from the key and the key is namespaced by table — a single ring shared by
   every table would be correct only by coincidence. Reads, writes, batches and conditional writes
@@ -88,7 +96,11 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 - **Shadow mode**: measure what your consistency *would have been*, against traffic Cachet does not
   serve, without changing a line of application code.
 - **Conformance suite**: every level's guarantee and documented non-guarantee as a cell, including
-  cells run against a deliberately broken cache that are *required to fail*.
+  cells run against a deliberately broken cache that are *required to fail*. Every cell runs
+  against three fixtures — the shipped table over `cachet.v1`, the same table over `cachet.v2`, and
+  a table with a string primary key, a nullable column, a DECIMAL and a version column called
+  something else. A guarantee that held only for the fixture would be a guarantee about the
+  fixture.
 - **Fault injection**: nine faults in [`FAULTS.md`](./FAULTS.md), each caught *and explained* by a
   named command or metric, each carrying evidence its injection fired.
 
@@ -102,6 +114,13 @@ Pre-1.0. Nothing has been tagged yet, so everything below is what exists on `mai
 
 ### Fixed
 
+- **A JSON column could not be written at all.** Every value was bound as bytes, which MySQL sends
+  with character set `binary` and refuses to build a JSON value from. Arguments are now bound per
+  column, so only a genuinely binary column is handed bytes.
+- **A primary key's declared collation was never checked against the database.** Declaring
+  `utf8mb4_bin` over a case-insensitive column passed every config check and produced exactly the
+  silent invalidation miss the declaration rules exist to prevent — MySQL treating two keys as one
+  row while Cachet treats them as two entries.
 - **The proxy refused every string-valued bound parameter.** A prepared statement's string, blob
   and decimal arguments arrive as the MySQL type plus raw bytes rather than as a Go string, and the
   classifier did not recognise that shape — so a table keyed by a `VARCHAR` could never be cached

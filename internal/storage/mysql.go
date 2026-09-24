@@ -7,10 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	// Registers the "mysql" driver name that OpenShard passes to sql.Open. Blank because nothing
-	// here calls into the package directly — and because dropping it turns every shard open into
-	// "unknown driver", a long way from the import that caused it.
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 )
 
 // ErrNotFound reports that a row does not exist.
@@ -60,6 +57,26 @@ func (s *Shard) Introspect(ctx context.Context, table string) ([]LiveColumn, []I
 	return Introspect(ctx, s.db, table)
 }
 
+// normaliseDSN forces the connection settings Cachet's correctness depends on.
+//
+// parseTime=false, always, whatever the operator wrote. With it on, the driver parses DATETIME and
+// TIMESTAMP into time.Time and hands back its OWN rendering — "2026-02-03T04:05:06.789Z" where
+// MySQL sent "2026-02-03 04:05:06.789". A cache entry would then hold a string the database would
+// never produce, the proxy would answer a client with it, and two reads of the same row would
+// differ depending on whether one of them was cached. Carrying the bytes MySQL sent is the property
+// the whole row encoding rests on, and it cannot be left to a query parameter.
+//
+// The driver's own parser is used rather than string surgery: a DSN it accepts and this function
+// mangled would connect somewhere unexpected.
+func normaliseDSN(dsn string) (string, error) {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", fmt.Errorf("storage: %w", err)
+	}
+	cfg.ParseTime = false
+	return cfg.FormatDSN(), nil
+}
+
 // OpenShard connects to a shard and verifies it is reachable.
 //
 // It fails fast rather than returning a lazily-connecting handle: a shard that is unreachable at
@@ -73,7 +90,11 @@ func OpenShard(ctx context.Context, id ShardID, dsn string, clock *Clock) (*Shar
 		return nil, errors.New("storage: nil clock")
 	}
 
-	db, err := sql.Open("mysql", dsn)
+	normalised, err := normaliseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open shard %s: %w", id, err)
+	}
+	db, err := sql.Open("mysql", normalised)
 	if err != nil {
 		return nil, fmt.Errorf("open shard %s: %w", id, err)
 	}

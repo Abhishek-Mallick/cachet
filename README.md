@@ -291,7 +291,9 @@ that need the guarantee to follow a request between services want the SDK.
 ## Guarantees, and how they are checked
 
 Every level's promise — and every documented *non*-promise — is executed as a cell of a conformance
-matrix across all four levels. The suite also runs the invalidation-dependent cells against a
+matrix across all four levels, and every cell runs against three fixtures: the shipped table over
+each wire protocol, and a table with a string primary key, a nullable column and a DECIMAL — because
+a guarantee that held only for the fixture would be a guarantee about the fixture. The suite also runs the invalidation-dependent cells against a
 deliberately naive cache and **requires them to fail**, because a consistency test that has never
 failed is proving nothing.
 

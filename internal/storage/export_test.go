@@ -30,12 +30,16 @@ func ForceRowVersionForTest(ctx context.Context, s *Shard, table string, row Row
 	stamped[t.d.VersionColumn.Index] = schema.Uint(uint64(v))
 
 	args := make([]any, 0, 2*len(stamped))
-	for _, val := range stamped {
-		args = append(args, val.SQL())
+	for i, val := range stamped {
+		args = append(args, t.d.Columns[i].Arg(val))
 	}
 	for _, i := range t.UpsertAssignedColumns() {
-		args = append(args, stamped[i].SQL())
+		args = append(args, t.d.Columns[i].Arg(stamped[i]))
 	}
 	_, err = s.db.ExecContext(ctx, t.UpsertStmt(), args...)
 	return err
 }
+
+// NormaliseDSNForTest exposes the connection-setting normalisation, which is otherwise observable
+// only by connecting to a database and reading a DATETIME back.
+func NormaliseDSNForTest(dsn string) (string, error) { return normaliseDSN(dsn) }

@@ -74,6 +74,14 @@ rather than surfacing on the first user request.
 ./bin/cachet -version
 ```
 
+**What a table may look like.** A single-column or composite primary key; integer, string, binary
+or text columns; nullable columns. Cachet reads the live schema at boot and refuses a declaration
+that does not match it — a missing column, a nullability mismatch, a primary key collation that
+disagrees, or a conditional write whose match columns no index covers. Two shapes are deliberately
+not supported and say so at boot rather than halfway through: batching and conditional writes on a
+composite key, and generated columns, which are left undeclared so the database keeps computing
+them.
+
 **Upgrading from a config without `tables:`?** Cachet used to have one table compiled in. Write it
 down mechanically — comments and all your own settings are preserved:
 
@@ -122,6 +130,17 @@ tables:
     # Order is not cosmetic: a column's position is part of the row encoding and of the row
     # fingerprint. Reordering these makes every existing entry read as a miss rather than
     # decoding old bytes into new columns.
+    # Types: uint8 · uint32 · uint64 · int64 · string · bytes · text.
+    #
+    # `text` is the one to reach for with DECIMAL, DATETIME, TIMESTAMP and JSON: they are carried
+    # as the text MySQL produced rather than parsed and re-rendered. A round trip through a Go time
+    # loses the difference between what was stored and what a driver chose to format, and DECIMAL
+    # through a float loses money.
+    #
+    # A string column in the PRIMARY KEY must also declare its collation, and it must be
+    # case- and accent-SENSITIVE. Under `utf8mb4_0900_ai_ci` MySQL treats 'Ann' and 'ann' as one
+    # row while Cachet would hold two entries, and an invalidation would silently miss one. The
+    # declaration is checked against the live column at boot.
     columns:
       - { name: id, type: uint64 }
       - { name: tenant_id, type: uint32 }

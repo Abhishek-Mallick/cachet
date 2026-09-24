@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
@@ -122,4 +123,41 @@ func indexOf(hay []string, needle string) int {
 		}
 	}
 	return -1
+}
+
+// TestParseTimeIsForcedOff pins a setting Cachet's correctness depends on and an operator can
+// otherwise turn off by editing a DSN.
+//
+// With parseTime on, the driver parses DATETIME and TIMESTAMP into time.Time and returns its own
+// rendering rather than the bytes MySQL sent. A cache entry would then hold a string the database
+// would never produce, and two reads of one row would differ depending on which was cached.
+func TestParseTimeIsForcedOff(t *testing.T) {
+	t.Parallel()
+
+	for name, dsn := range map[string]string{
+		"an operator who turned it on": "u:p@tcp(127.0.0.1:3306)/cachet?parseTime=true",
+		"the shipped example":          "root:cachet@tcp(127.0.0.1:3316)/cachet?parseTime=true&interpolateParams=true",
+		"one that never mentioned it":  "u:p@tcp(127.0.0.1:3306)/cachet",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := storage.NormaliseDSNForTest(dsn)
+			if err != nil {
+				t.Fatalf("NormaliseDSNForTest: %v", err)
+			}
+			if strings.Contains(got, "parseTime=true") {
+				t.Errorf("parseTime survived normalisation: %s", got)
+			}
+			// Everything else the operator wrote has to survive, or normalising a DSN would be a
+			// way to lose a setting.
+			if strings.Contains(dsn, "interpolateParams=true") && !strings.Contains(got, "interpolateParams=true") {
+				t.Errorf("normalisation dropped interpolateParams: %s", got)
+			}
+		})
+	}
+
+	if _, err := storage.NormaliseDSNForTest("not a dsn"); err == nil {
+		t.Error("a malformed DSN was accepted; it would connect somewhere unexpected")
+	}
 }
