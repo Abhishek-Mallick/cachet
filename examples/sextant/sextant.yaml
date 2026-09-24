@@ -1,0 +1,102 @@
+# Sextant, pointed at a cache that has never heard of Cachet.
+#
+# Sextant answers one question with a number: is this cache as consistent as you believe it is.
+# Everything below exists so that the number means something specific, and so that a run which
+# could not measure something says so rather than reporting zero violations for it.
+#
+#   sextant -config sextant.yaml
+#
+# Verifying a Cachet deployment instead? Use `sextant -cachet-config cachet.yaml`, which reads
+# Cachet's own entries and routes the origin by its hash ring — exact, and no key template to get
+# wrong.
+
+# How entries are compared. This label is on every metric, because a run that could only compare
+# values must not be readable as a claim about BOUNDED.
+#
+#   value     the cached value against a projection of the row. EVENTUAL only.
+#   version   a version field in the cached value against a database column. Everything.
+#   cachet    a Cachet deployment's own fill version.
+#
+# `version` is the one to aim for: it costs your application one field in whatever it already
+# caches, and it buys SESSION and BOUNDED(t) — both of which are statements about WHICH database
+# state an entry reflects, and neither of which a value comparison can answer.
+tier: version
+
+# The system of record. Read-only, one statement, built once from these identifiers; the key is
+# always a bound argument.
+origin:
+  dsns:
+    - "verifier:password@tcp(mysql-0:3306)/app"
+  table: orders
+  key_column: id
+
+  # The column `tier: version` compares against.
+  version_column: row_version
+
+  # The projection `tier: value` compares against. It must be produced the same way your
+  # application produces what it caches — a projection that does not match makes every entry look
+  # stale, permanently, which is a configuration error that is meant to be loud.
+  value_columns: [status, total]
+
+  # single, or hash across the DSNs above. Declared rather than inferred: it is only correct if it
+  # is the same function your application uses, and a verifier that guessed would read the wrong
+  # writer and find every key missing — which looks exactly like a healthy cache.
+  shard: single
+
+# The cache being verified. Grant this user `+@read` only: Sextant exposes no way to write, and the
+# ACL is the half of that promise your security team can check without reading Go.
+cache:
+  addrs: ["redis-0:6379"]
+  username: verifier
+  password: ""
+  db: 0
+
+  # Your cache key layout, not Cachet's. `{key}` is replaced with the key being checked.
+  key_template: "order:{key}"
+
+  # Where the version lives in what you cached.
+  #   raw    nowhere — value tier only
+  #   json   a top-level field of a JSON object
+  #   hash   a field of a Redis hash
+  codec: json
+  version_field: row_version
+
+  # For the hash codec, the fields a value comparison compares, in this order. Order matters: a map
+  # has none, and an unordered projection makes every entry look stale.
+  value_fields: []
+
+# Where the keys to check come from. This decides what can be found.
+keys:
+  # binlog   rows that CHANGED, read from replication. The population a stale entry lives in, and
+  #          it comes from the database — so the cache cannot steer what it is checked on.
+  # file     a fixed list. Exact and reproducible.
+  # scan     the cache's own keyspace. DEGRADED, and the metric says so: a dropped invalidation
+  #          that left no entry cannot be sampled at all, so the failure hides itself.
+  source: binlog
+  capacity: 10000
+  file: ""
+
+# The line between a benign in-flight race and a real violation. Summed from what your system
+# promises, not tuned by hand: too tight and every healthy deployment reports violations
+# continuously until nobody opens the dashboard; too loose and real staleness reads as healthy,
+# which is worse than no verifier at all.
+bound:
+  write_path_invalidation_budget: 50ms
+  cdc_lag_bound: 5s
+  max_clock_skew: 250ms
+
+# The load Sextant puts on the system it is observing. A deliberate number: it samples, it does not
+# serve traffic.
+sampling:
+  interval: 1s
+  batch: 100
+
+# The rolling window the published figure is measured over.
+slo_window: 5m
+
+metrics_listen: ":9101"
+
+# Observing a deployment no application reads through. Changes nothing about the arithmetic and
+# everything about how the result should be read, so it is carried onto the dashboard rather than
+# left for an operator to remember.
+shadow: false

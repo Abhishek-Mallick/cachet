@@ -45,7 +45,8 @@ func main() {
 }
 
 func run() error {
-	configPath := flag.String("config", "", "path to a YAML config file")
+	configPath := flag.String("config", "", "path to a sextant.yaml — verifies any cache")
+	cachetConfig := flag.String("cachet-config", "", "path to a cachet.yaml — verifies a Cachet deployment natively")
 	shadow := flag.Bool("shadow", false,
 		"observe only: report what consistency WOULD have been, for a deployment no application reads through")
 	interval := flag.Duration("interval", time.Second, "time between sampling rounds")
@@ -60,7 +61,17 @@ func run() error {
 		return nil
 	}
 
-	cfg, err := config.Load(*configPath, envMap())
+	switch {
+	case *configPath != "" && *cachetConfig != "":
+		return errors.New("sextant: give -config or -cachet-config, not both")
+	case *configPath != "":
+		// Standalone: generic adapters, somebody else's cache, Sextant's own configuration.
+		return runStandalone(*configPath)
+	case *cachetConfig == "":
+		return errors.New("sextant: -config <sextant.yaml> or -cachet-config <cachet.yaml> is required")
+	}
+
+	cfg, err := config.Load(*cachetConfig, envMap())
 	if err != nil {
 		return err
 	}
@@ -280,4 +291,50 @@ func envMap() map[string]string {
 		}
 	}
 	return out
+}
+
+// runStandalone verifies a cache that has never heard of Cachet.
+//
+// The native path below reads Cachet's own entries through its cache client and routes the origin
+// by its hash ring, which is exact and needs no configuration beyond the deployment's own. This
+// path is the general case: a declared table, a declared key template, and a declared way to find
+// a version — or no version at all, in which case the tier says so on every metric.
+func runStandalone(path string) error {
+	cfg, err := pubsextant.LoadConfig(path)
+	if err != nil {
+		return err
+	}
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	built, err := pubsextant.Build(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := built.Close(); err != nil {
+			log.Warn("closing verifier", "err", err)
+		}
+	}()
+
+	registry := prometheus.NewRegistry()
+	if err := pubsextant.RegisterMetrics(registry, built.SLO, built.Verifier); err != nil {
+		return err
+	}
+	go serveMetrics(ctx, cfg.MetricsListen, registry, log)
+
+	log.Info("verifying",
+		"tier", cfg.Tier,
+		"keys", cfg.Keys.Source,
+		"degraded_keys", built.Verifier.KeySourceDegraded(),
+		"origin", cfg.Origin.Table,
+		"levels", built.Verifier.Levels(),
+		"metrics", cfg.MetricsListen)
+	if cfg.Shadow {
+		log.Info("running in SHADOW mode: reporting what consistency would have been; " +
+			"no application traffic is served from this deployment")
+	}
+	return built.Verifier.Run(ctx)
 }
