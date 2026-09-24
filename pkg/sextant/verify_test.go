@@ -45,7 +45,7 @@ func TestAnUpToDateEntryIsNotAViolation(t *testing.T) {
 
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 100, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 100),
 		BehindSince: at(0), Now: at(30),
 	}
 	if v, is := sextant.Classify(obs, bound()); is {
@@ -60,7 +60,7 @@ func TestAnEntryAheadOfTheDatabaseIsNotAViolation(t *testing.T) {
 	// before it. Reporting it would make the verifier's own read ordering look like a cache bug.
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 90, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 90),
 		BehindSince: at(0), Now: at(30),
 	}
 	if v, is := sextant.Classify(obs, bound()); is {
@@ -77,7 +77,7 @@ func TestAnInFlightRaceIsNotAViolation(t *testing.T) {
 	p := bound()
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 200, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 200),
 		BehindSince: at(0),
 		Now:         at(0).Add(p.Duration() - time.Millisecond),
 	}
@@ -93,7 +93,7 @@ func TestStaleBeyondThePropagationBoundIsAViolation(t *testing.T) {
 	p := bound()
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 200, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 200),
 		BehindSince: at(0),
 		Now:         at(0).Add(p.Duration() + time.Millisecond),
 	}
@@ -101,7 +101,7 @@ func TestStaleBeyondThePropagationBoundIsAViolation(t *testing.T) {
 	if !is {
 		t.Fatal("an entry behind for longer than the propagation bound was not reported as a violation")
 	}
-	if v.Key != "entities:1" || v.DBVersion != 200 || v.FillVersion != 100 {
+	if v.Key != "entities:1" || v.Diff.DBVersion != 200 || v.Diff.FillVersion != 100 {
 		t.Errorf("the violation does not carry what is needed to investigate it: %+v", v)
 	}
 	if v.Behind <= 0 {
@@ -118,7 +118,7 @@ func TestExactlyAtTheBoundIsNotYetAViolation(t *testing.T) {
 	p := bound()
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 200, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 200),
 		BehindSince: at(0), Now: at(0).Add(p.Duration()),
 	}
 	if _, is := sextant.Classify(obs, p); is {
@@ -135,7 +135,7 @@ func TestAViolationIsAttributedToTheRightLevels(t *testing.T) {
 	p := bound()
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 200, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 200),
 		BehindSince: at(0), Now: at(0).Add(p.Duration() + time.Second),
 		Watermark: 150, WatermarkKnown: true,
 	}
@@ -168,7 +168,7 @@ func TestAStaleEntryAboveTheWatermarkDoesNotViolateSession(t *testing.T) {
 	p := bound()
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 200, FillVersion: 150,
+		Diff:        sextant.VersionDifference(150, 200),
 		BehindSince: at(0), Now: at(0).Add(p.Duration() + time.Second),
 		Watermark: 150, WatermarkKnown: true,
 	}
@@ -194,7 +194,7 @@ func TestWithNoWatermarkSessionIsNotAccused(t *testing.T) {
 	p := bound()
 	obs := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 200, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 200),
 		BehindSince: at(0), Now: at(0).Add(p.Duration() + time.Second),
 		WatermarkKnown: false,
 	}
@@ -213,7 +213,7 @@ func TestBoundedIsViolatedOnlyPastItsOwnWindow(t *testing.T) {
 	p := bound()
 	base := sextant.Observation{
 		Key: "entities:1", Shard: "shard0",
-		DBVersion: 200, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 200),
 		BehindSince: at(0),
 	}
 
@@ -248,7 +248,7 @@ func TestAViolationExplainsItself(t *testing.T) {
 	p := bound()
 	obs := sextant.Observation{
 		Key: "entities:42", Shard: "shard1",
-		DBVersion: 200, FillVersion: 100,
+		Diff:        sextant.VersionDifference(100, 200),
 		BehindSince: at(0), Now: at(0).Add(p.Duration() + time.Second),
 	}
 	v, is := sextant.Classify(obs, p)

@@ -382,7 +382,31 @@ violation, because something was dropped, reordered, or lost.
 Sextant exports one gauge per level. **The nines on the dashboard are per level**, because a single
 blended number would hide exactly the trade the levels exist to expose.
 
-**Tests:** `conformance/violation_test.go` — `TestInFlightRaceIsNotAViolation`,
+### 7.1 What a verifier can know
+
+The definition above assumes a version. Cachet's own entries carry one — an HLC fill version — so
+`e.fv < db_version(k)` is an exact comparison. A cache that is not Cachet's may hold nothing but the
+application's own value, and then there is no ordering to compare at all.
+
+Sextant therefore states **which comparison it made**, on every series it exports, as a `tier`
+label:
+
+| Tier | Comparison | Can evaluate |
+|---|---|---|
+| `value` | The cached value against a projection of the database row | `EVENTUAL` only |
+| `version` | A version field extracted from the cached value against a database column | `EVENTUAL`, `SESSION`, `BOUNDED(t)` |
+| `cachet` | The entry's HLC fill version against the row version | All of the above |
+
+`SESSION` and `BOUNDED(t)` are statements about **which** database state an entry reflects, not
+about whether it differs from the current one. Two values differing tells you an entry is not
+current; it does not tell you what it is. So at the `value` tier those levels are **not exported at
+all** — not as zero violations, which reads as a clean bill of health, but as not measured.
+
+A dashboard showing consistency nines without a tier label is therefore ambiguous in the one
+direction that matters, and that is why the label is not optional.
+
+**Tests:** `pkg/sextant/tier_test.go` — `TestAValueTierObservationCannotViolateAnOrderedLevel`,
+`TestTheTierIsOnEveryExportedSeries`. And `conformance/violation_test.go` — `TestInFlightRaceIsNotAViolation`,
 `TestStaleBeyondPropagationBoundIsAViolation`, `TestViolationIsAttributedToTheRightLevels`.
 
 ---

@@ -182,7 +182,7 @@ func TestStalenessPastTheBoundIsReported(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("OnViolation fired %d times, want 1", len(found))
 	}
-	if found[0].Key != "entities:1" || found[0].DBVersion != 200 {
+	if found[0].Key != "entities:1" || found[0].Diff.DBVersion != 200 {
 		t.Errorf("the violation does not describe what was wrong: %+v", found[0])
 	}
 	if r := slo.Report(consistency.Eventual, clk.Now()); r.Violations != 1 {

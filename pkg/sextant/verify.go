@@ -53,12 +53,13 @@ type Observation struct {
 	Key   string
 	Shard string
 
-	// DBVersion is the row's version in the database; FillVersion is the database state the cached
-	// entry was filled from. Comparing FILL version rather than row version is what makes this
+	// Diff is how this entry compared against the origin. It carries versions only at a tier that
+	// has them; a value comparison reports only whether the entry is behind.
+	//
+	// Comparing FILL version rather than row version is what makes a version-tier observation
 	// answer "how stale is the snapshot behind this entry", which is the question the guarantee is
 	// written in terms of (CONSISTENCY.md §1).
-	DBVersion   uint64
-	FillVersion uint64
+	Diff Difference
 
 	// BehindSince is when the entry was first seen behind the database, and Now is the moment of
 	// this observation. The pair is what makes the propagation bound a DURATION rather than a
@@ -83,8 +84,8 @@ type Violation struct {
 	Key   string
 	Shard string
 
-	DBVersion   uint64
-	FillVersion uint64
+	// Diff is the comparison that produced this violation.
+	Diff Difference
 
 	// Behind is how long the entry had been stale when it was observed.
 	Behind time.Duration
@@ -110,8 +111,12 @@ func (v Violation) Violates(l consistency.Level) bool {
 
 // String renders the violation for someone reading it during an incident.
 func (v Violation) String() string {
+	if !v.Diff.VersionsKnown {
+		return fmt.Sprintf("%s on %s: entry differs from the row, behind %s, violates %v",
+			v.Key, v.Shard, v.Behind.Round(time.Millisecond), v.Levels)
+	}
 	return fmt.Sprintf("%s on %s: cache fv=%d, db=%d, behind %s, violates %v",
-		v.Key, v.Shard, v.FillVersion, v.DBVersion, v.Behind.Round(time.Millisecond), v.Levels)
+		v.Key, v.Shard, v.Diff.FillVersion, v.Diff.DBVersion, v.Behind.Round(time.Millisecond), v.Levels)
 }
 
 // Classify decides whether an observation is a violation, and of which levels.
@@ -122,7 +127,7 @@ func Classify(obs Observation, p PropagationBound) (Violation, bool) {
 	// Not behind at all — including the case where the entry is AHEAD, which happens legitimately
 	// when the verifier read the cache after a write landed and the database before it. Reporting
 	// that would make the verifier's own read ordering look like a cache bug.
-	if obs.FillVersion >= obs.DBVersion {
+	if !obs.Diff.Behind {
 		return Violation{}, false
 	}
 
@@ -136,12 +141,11 @@ func Classify(obs Observation, p PropagationBound) (Violation, bool) {
 	}
 
 	v := Violation{
-		Key:         obs.Key,
-		Shard:       obs.Shard,
-		DBVersion:   obs.DBVersion,
-		FillVersion: obs.FillVersion,
-		Behind:      behind,
-		Trace:       obs.Trace,
+		Key:    obs.Key,
+		Shard:  obs.Shard,
+		Diff:   obs.Diff,
+		Behind: behind,
+		Trace:  obs.Trace,
 	}
 
 	// EVENTUAL: the entry never converged within the bound. Every violation counts here, because
@@ -152,13 +156,21 @@ func Classify(obs Observation, p PropagationBound) (Violation, bool) {
 	// promises read-own-writes and monotonic reads, never read-others-writes — an entry that is
 	// stale relative to the database but at or above what this session has observed is exactly the
 	// staleness the level documents as permitted.
-	if obs.WatermarkKnown && obs.FillVersion < obs.Watermark {
+	//
+	// It needs an ORDERING, so it is only evaluable where versions exist. At the value tier the
+	// question cannot be asked at all, and answering "no violation" would be a clean bill of health
+	// the observation does not support.
+	if obs.Diff.VersionsKnown && obs.WatermarkKnown && obs.Diff.FillVersion < obs.Watermark {
 		v.Levels = append(v.Levels, consistency.Session)
 	}
 
 	// BOUNDED(t): violated only past its own window, widened by the clock-skew allowance so the
 	// engine stays conservative about its own clock.
-	if obs.BoundedWindow > 0 && behind > obs.BoundedWindow+p.MaxClockSkew() {
+	//
+	// Version-gated for the same reason as SESSION: BOUNDED(t) promises an entry reflects every
+	// write committed at or before T−t, which is a statement about WHICH database state the entry
+	// holds. Two values differing says an entry is not current; it does not say what it is.
+	if obs.Diff.VersionsKnown && obs.BoundedWindow > 0 && behind > obs.BoundedWindow+p.MaxClockSkew() {
 		v.Levels = append(v.Levels, consistency.Bounded)
 	}
 

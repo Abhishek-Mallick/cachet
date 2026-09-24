@@ -49,6 +49,11 @@ type VerifierOptions struct {
 	SLO    *SLO
 	Tracer *Tracer
 
+	// Tier is how this verifier compares a cache entry against the origin, and it appears on every
+	// metric rather than in a footnote. A value-tier run must not be readable as a BOUNDED claim.
+	// Defaults to TierCachet, which is the only tier the built-in adapters produce.
+	Tier Tier
+
 	// Interval is how long between sampling rounds, and Batch is how many keys each round checks.
 	// Together they are the load Sextant puts on the system it is observing, which must be a
 	// deliberate number rather than "as fast as possible".
@@ -114,6 +119,13 @@ func NewVerifier(opts VerifierOptions) (*Verifier, error) {
 	}
 	if opts.Tracer == nil {
 		opts.Tracer = NewTracer(TracerOptions{})
+	}
+	if opts.Tier == "" {
+		// The built-in adapters read Cachet's own entries, which carry an HLC fill version.
+		opts.Tier = TierCachet
+	}
+	if !opts.Tier.Valid() {
+		return nil, fmt.Errorf("sextant: unknown tier %q", opts.Tier)
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -200,7 +212,8 @@ func (v *Verifier) check(ctx context.Context, key string, round *Stats) error {
 	round.Checked++
 	now := v.now()
 
-	if fillVersion >= dbVersion {
+	diff := VersionDifference(fillVersion, dbVersion)
+	if !diff.Behind {
 		// Caught up — including the case where the entry is ahead, which happens when the cache was
 		// read after a write landed and the database before it.
 		v.forget(key)
@@ -216,8 +229,7 @@ func (v *Verifier) check(ctx context.Context, key string, round *Stats) error {
 	obs := Observation{
 		Key:         key,
 		Shard:       shard,
-		DBVersion:   dbVersion,
-		FillVersion: fillVersion,
+		Diff:        diff,
 		BehindSince: v.firstSeenBehind(key, now),
 		Now:         now,
 		Trace:       v.opts.Tracer.Trace(key),
@@ -233,7 +245,7 @@ func (v *Verifier) check(ctx context.Context, key string, round *Stats) error {
 	}
 
 	round.Violations++
-	for _, level := range []consistency.Level{consistency.Session, consistency.Bounded, consistency.Eventual} {
+	for _, level := range v.Levels() {
 		v.opts.SLO.Observe(level, now, violation.Violates(level))
 	}
 	if v.opts.OnViolation != nil {
@@ -244,7 +256,7 @@ func (v *Verifier) check(ctx context.Context, key string, round *Stats) error {
 
 // observeClean records one clean observation against every level that reads the cache.
 func (v *Verifier) observeClean(now time.Time) {
-	for _, level := range []consistency.Level{consistency.Session, consistency.Bounded, consistency.Eventual} {
+	for _, level := range v.Levels() {
 		v.opts.SLO.Observe(level, now, false)
 	}
 }
@@ -275,6 +287,22 @@ func (v *Verifier) Stats() Stats {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.stats
+}
+
+// Tier is how this verifier compares entries against the origin.
+func (v *Verifier) Tier() Tier { return v.opts.Tier }
+
+// Levels reports which consistency levels this verifier can evaluate at all.
+//
+// SESSION and BOUNDED both rest on an ordering between an entry and the database, so a tier that
+// cannot compare versions cannot evaluate them. Reporting zero violations for a level nobody
+// measured is a clean bill of health nothing supports, which is why the set is published rather
+// than assumed.
+func (v *Verifier) Levels() []consistency.Level {
+	if v.opts.Tier.ComparesVersions() {
+		return []consistency.Level{consistency.Session, consistency.Bounded, consistency.Eventual}
+	}
+	return []consistency.Level{consistency.Eventual}
 }
 
 // Shadow reports whether this verifier is observing a deployment serving no application traffic.

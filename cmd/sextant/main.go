@@ -32,7 +32,6 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/config"
 	"github.com/Abhishek-Mallick/cachet/internal/sextant"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
-	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
 	pubsextant "github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
@@ -152,7 +151,9 @@ func run() error {
 	go tailForCandidates(ctx, cfg, keys, tracer, log)
 
 	registry := prometheus.NewRegistry()
-	registerSLO(registry, slo, verifier)
+	if err := pubsextant.RegisterMetrics(registry, slo, verifier); err != nil {
+		return err
+	}
 	go serveMetrics(ctx, cfg.Observability.MetricsListen, registry, log)
 
 	if *shadow {
@@ -243,44 +244,6 @@ type noCheckpoint struct{}
 
 func (noCheckpoint) Load() (cdc.Position, bool, error) { return cdc.Position{}, false, nil }
 func (noCheckpoint) Save(cdc.Position) error           { return nil }
-
-// registerSLO exports the measured consistency figure per level.
-func registerSLO(reg *prometheus.Registry, slo *pubsextant.SLO, v *pubsextant.Verifier) {
-	levels := []consistency.Level{consistency.Session, consistency.Bounded, consistency.Eventual}
-
-	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Namespace: "cachet", Subsystem: "sextant", Name: "shadow_mode",
-		Help: "1 when observing a deployment that serves no application traffic.",
-	}, func() float64 {
-		if v.Shadow() {
-			return 1
-		}
-		return 0
-	}))
-
-	for _, level := range levels {
-		l := level
-		labels := prometheus.Labels{"level": l.String()}
-
-		// Nines are gauged rather than the raw fraction, because that is how this gets discussed —
-		// and because a fraction rounded for display hides the difference between 0.999 and 0.99999
-		// exactly where it matters most.
-		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Namespace: "cachet", Subsystem: "sextant", Name: "consistency_nines",
-			Help: "Measured consistency per level, in nines. Absent until observations exist.", ConstLabels: labels,
-		}, func() float64 { return slo.Report(l, time.Now()).Nines }))
-
-		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Namespace: "cachet", Subsystem: "sextant", Name: "observations",
-			Help: "Observations in the current window. Zero means the figure above is not evidence.", ConstLabels: labels,
-		}, func() float64 { return float64(slo.Report(l, time.Now()).Observations) }))
-
-		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Namespace: "cachet", Subsystem: "sextant", Name: "violations",
-			Help: "Violations in the current window.", ConstLabels: labels,
-		}, func() float64 { return float64(slo.Report(l, time.Now()).Violations) }))
-	}
-}
 
 func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry, log *slog.Logger) {
 	if addr == "" {
