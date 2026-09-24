@@ -33,6 +33,7 @@ import (
 	"github.com/Abhishek-Mallick/cachet/internal/sextant"
 	"github.com/Abhishek-Mallick/cachet/internal/storage"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
+	pubsextant "github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
 var version = "dev"
@@ -109,17 +110,17 @@ func run() error {
 	// The propagation bound is summed from the engine's own guarantee settings, not tuned here. A
 	// verifier with its own idea of the threshold would drift from the guarantee the moment anyone
 	// changed a setting, and nothing would report the drift.
-	bound := sextant.NewPropagationBound(
+	bound := pubsextant.NewPropagationBound(
 		cfg.Consistency.WritePathInvalidationBudget,
 		cfg.Consistency.CDCLagBound,
 		cfg.Consistency.MaxClockSkew,
 	)
 
-	slo := sextant.NewSLO(*window)
-	tracer := sextant.NewTracer(sextant.TracerOptions{})
-	keys := sextant.NewRecentKeys(*candidates)
+	slo := pubsextant.NewSLO(*window)
+	tracer := pubsextant.NewTracer(pubsextant.TracerOptions{})
+	keys := pubsextant.NewRecentKeys(*candidates)
 
-	verifier, err := sextant.NewVerifier(sextant.VerifierOptions{
+	verifier, err := pubsextant.NewVerifier(pubsextant.VerifierOptions{
 		Cache:    sextant.NewCacheAdapter(cacheClient),
 		Origin:   sextant.NewOriginAdapter(router, shards),
 		Keys:     keys,
@@ -130,7 +131,7 @@ func run() error {
 		Batch:    *batch,
 		Shadow:   *shadow,
 		Logger:   log,
-		OnViolation: func(v sextant.Violation) {
+		OnViolation: func(v pubsextant.Violation) {
 			// The violation and its trace together. A monitor logs that something was stale; this
 			// logs what happened to the key and from which path, which is the only form in which
 			// the finding is actionable.
@@ -162,7 +163,7 @@ func run() error {
 }
 
 // tailForCandidates feeds recently-written keys to the verifier, and their mutations to the tracer.
-func tailForCandidates(ctx context.Context, cfg config.Config, keys *sextant.RecentKeys, tracer *sextant.Tracer, log *slog.Logger) {
+func tailForCandidates(ctx context.Context, cfg config.Config, keys *pubsextant.RecentKeys, tracer *pubsextant.Tracer, log *slog.Logger) {
 	// The declared table, not a compiled-in one. Sextant checks a deployment's own consistency, so
 	// a table name it assumed would make it check a table nobody has.
 	descriptors, err := cfg.Descriptors()
@@ -215,19 +216,19 @@ func tailForCandidates(ctx context.Context, cfg config.Config, keys *sextant.Rec
 // cache. A verifier that invalidated entries would be repairing the very staleness it is supposed
 // to be measuring, and its own number would be the evidence it had done so.
 type observeOnly struct {
-	keys   *sextant.RecentKeys
-	tracer *sextant.Tracer
+	keys   *pubsextant.RecentKeys
+	tracer *pubsextant.Tracer
 	shard  string
 }
 
 func (o observeOnly) Tombstone(_ context.Context, key string, version uint64) (bool, error) {
 	o.keys.Touch(key)
-	o.tracer.Record(key, sextant.Event{
-		Op:      sextant.OpTombstone,
+	o.tracer.Record(key, pubsextant.Event{
+		Op:      pubsextant.OpTombstone,
 		Version: version,
 		At:      time.Now(),
 		Actor:   o.shard,
-		Source:  sextant.SourceCDC,
+		Source:  pubsextant.SourceCDC,
 	})
 	// Reporting "not applied" is the honest answer: nothing was applied.
 	return false, nil
@@ -244,7 +245,7 @@ func (noCheckpoint) Load() (cdc.Position, bool, error) { return cdc.Position{}, 
 func (noCheckpoint) Save(cdc.Position) error           { return nil }
 
 // registerSLO exports the measured consistency figure per level.
-func registerSLO(reg *prometheus.Registry, slo *sextant.SLO, v *sextant.Verifier) {
+func registerSLO(reg *prometheus.Registry, slo *pubsextant.SLO, v *pubsextant.Verifier) {
 	levels := []consistency.Level{consistency.Session, consistency.Bounded, consistency.Eventual}
 
 	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{

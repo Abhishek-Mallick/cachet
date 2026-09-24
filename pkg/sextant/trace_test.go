@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Abhishek-Mallick/cachet/internal/sextant"
+	"github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
 // Tracing is built before detection, deliberately (build plan §10.5). Detection without tracing

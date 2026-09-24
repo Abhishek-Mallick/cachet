@@ -1,3 +1,10 @@
+// Package sextant verifies that a cache is as consistent as it claims to be.
+//
+// It is published rather than internal because a verifier nobody can point at their own deployment
+// verifies nothing anybody else can check. The rule that decides whether an observation is a
+// violation lives in Classify, once, so that the number on a dashboard and the sentence in
+// CONSISTENCY.md cannot drift apart — which is also why this package holds no adapters. What it
+// reads is somebody else's problem; what counts as a violation is this package's.
 package sextant
 
 import (

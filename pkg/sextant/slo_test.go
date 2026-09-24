@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Abhishek-Mallick/cachet/internal/sextant"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
+	"github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
 // The SLO is the product claim reduced to a number, so what it reports has to be defensible in

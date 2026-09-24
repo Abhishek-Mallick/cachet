@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/Abhishek-Mallick/cachet/internal/sextant"
+	"github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
 func TestRecentKeysReturnsNothingWhenEmpty(t *testing.T) {

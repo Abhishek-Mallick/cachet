@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Abhishek-Mallick/cachet/internal/sextant"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
+	"github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
 // The detection loop, driven deterministically. RunOnce is exported precisely so these tests do not

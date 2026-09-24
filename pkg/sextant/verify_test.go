@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Abhishek-Mallick/cachet/internal/sextant"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
+	"github.com/Abhishek-Mallick/cachet/pkg/sextant"
 )
 
 // This file is the definition in CONSISTENCY.md §7, executable:

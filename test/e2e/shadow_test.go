@@ -11,6 +11,7 @@ import (
 	cachetv1 "github.com/Abhishek-Mallick/cachet/api/cachet/v1"
 	"github.com/Abhishek-Mallick/cachet/internal/sextant"
 	"github.com/Abhishek-Mallick/cachet/pkg/consistency"
+	pubsextant "github.com/Abhishek-Mallick/cachet/pkg/sextant"
 	"github.com/Abhishek-Mallick/cachet/test/harness"
 )
 
@@ -25,19 +26,19 @@ import (
 // project and it must not rot.
 
 // shadowVerifier builds a verifier over a cluster's real cache and shards, observing only.
-func shadowVerifier(t *testing.T, cluster *harness.Cluster, keys *sextant.RecentKeys, now func() time.Time) (*sextant.Verifier, *sextant.SLO, *sextant.Tracer) {
+func shadowVerifier(t *testing.T, cluster *harness.Cluster, keys *pubsextant.RecentKeys, now func() time.Time) (*pubsextant.Verifier, *pubsextant.SLO, *pubsextant.Tracer) {
 	t.Helper()
 
-	slo := sextant.NewSLO(time.Hour)
-	tracer := sextant.NewTracer(sextant.TracerOptions{})
+	slo := pubsextant.NewSLO(time.Hour)
+	tracer := pubsextant.NewTracer(pubsextant.TracerOptions{})
 
-	v, err := sextant.NewVerifier(sextant.VerifierOptions{
+	v, err := pubsextant.NewVerifier(pubsextant.VerifierOptions{
 		Cache:  sextant.NewCacheAdapter(cluster.Cache),
 		Origin: sextant.NewOriginAdapter(cluster.Router, cluster.Shards),
 		Keys:   keys,
 		// The bound the harness engine actually promises. Summed from settings rather than picked,
 		// so the verifier and the engine cannot disagree about what was promised.
-		Bound:  sextant.NewPropagationBound(50*time.Millisecond, 5*time.Second, 250*time.Millisecond),
+		Bound:  pubsextant.NewPropagationBound(50*time.Millisecond, 5*time.Second, 250*time.Millisecond),
 		SLO:    slo,
 		Tracer: tracer,
 		Batch:  200,
@@ -59,7 +60,7 @@ func TestShadowModeReportsANumberForAHealthySystem(t *testing.T) {
 	}, "tcp://127.0.0.1:0")
 	c := cluster.Client(t, cluster.Addrs[0])
 
-	keys := sextant.NewRecentKeys(1000)
+	keys := pubsextant.NewRecentKeys(1000)
 	now := time.Now()
 	v, slo, _ := shadowVerifier(t, cluster, keys, func() time.Time { return now })
 
@@ -118,7 +119,7 @@ func TestShadowModeDetectsRealStaleness(t *testing.T) {
 	}, "tcp://127.0.0.1:0")
 	c := cluster.Client(t, cluster.Addrs[0])
 
-	keys := sextant.NewRecentKeys(1000)
+	keys := pubsextant.NewRecentKeys(1000)
 	now := time.Now()
 	clock := func() time.Time { return now }
 	v, slo, _ := shadowVerifier(t, cluster, keys, clock)
@@ -202,7 +203,7 @@ func TestShadowModeNeverMutatesTheCache(t *testing.T) {
 		t.Fatalf("precondition: the entry should be cached (hit=%v err=%v)", hit, err)
 	}
 
-	keys := sextant.NewRecentKeys(10)
+	keys := pubsextant.NewRecentKeys(10)
 	keys.Touch(key)
 	now := time.Now().Add(time.Hour) // well past the propagation bound
 	v, _, _ := shadowVerifier(t, cluster, keys, func() time.Time { return now })
@@ -243,29 +244,29 @@ func TestAViolationCarriesATraceThatExplainsIt(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	keys := sextant.NewRecentKeys(10)
+	keys := pubsextant.NewRecentKeys(10)
 	keys.Touch(key)
 	now := time.Now()
-	slo := sextant.NewSLO(time.Hour)
-	tracer := sextant.NewTracer(sextant.TracerOptions{})
+	slo := pubsextant.NewSLO(time.Hour)
+	tracer := pubsextant.NewTracer(pubsextant.TracerOptions{})
 
 	// The mutations Sextant would have observed from the binlog.
-	tracer.Record(key, sextant.Event{
-		Op: sextant.OpFill, Version: 1, At: now, Source: sextant.SourceReadFill, Actor: "engine-1",
+	tracer.Record(key, pubsextant.Event{
+		Op: pubsextant.OpFill, Version: 1, At: now, Source: pubsextant.SourceReadFill, Actor: "engine-1",
 	})
-	tracer.Record(key, sextant.Event{
-		Op: sextant.OpTombstone, Version: 2, At: now, Source: sextant.SourceCDC, Actor: "shard1",
+	tracer.Record(key, pubsextant.Event{
+		Op: pubsextant.OpTombstone, Version: 2, At: now, Source: pubsextant.SourceCDC, Actor: "shard1",
 	})
 
-	var got sextant.Violation
-	v, err := sextant.NewVerifier(sextant.VerifierOptions{
+	var got pubsextant.Violation
+	v, err := pubsextant.NewVerifier(pubsextant.VerifierOptions{
 		Cache:  sextant.NewCacheAdapter(cluster.Cache),
 		Origin: sextant.NewOriginAdapter(cluster.Router, cluster.Shards),
 		Keys:   keys,
-		Bound:  sextant.NewPropagationBound(50*time.Millisecond, 5*time.Second, 250*time.Millisecond),
+		Bound:  pubsextant.NewPropagationBound(50*time.Millisecond, 5*time.Second, 250*time.Millisecond),
 		SLO:    slo, Tracer: tracer, Batch: 10, Shadow: true,
 		Now:         func() time.Time { return now },
-		OnViolation: func(vi sextant.Violation) { got = vi },
+		OnViolation: func(vi pubsextant.Violation) { got = vi },
 	})
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
