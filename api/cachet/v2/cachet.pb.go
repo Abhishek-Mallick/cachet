@@ -395,8 +395,15 @@ type ReadMeta struct {
 	CacheHit       bool                   `protobuf:"varint,4,opt,name=cache_hit,json=cacheHit,proto3" json:"cache_hit,omitempty"`
 	RowVersion     uint64                 `protobuf:"varint,5,opt,name=row_version,json=rowVersion,proto3" json:"row_version,omitempty"`
 	FillVersion    uint64                 `protobuf:"varint,6,opt,name=fill_version,json=fillVersion,proto3" json:"fill_version,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// How stale this answer may be, when something about serving it weakened the promise.
+	//
+	// Set when degraded is true and the weakening has a duration — a read served from the gutter
+	// pool while its home cache node is not answering is bounded by the gutter TTL, because nothing
+	// invalidates a gutter entry. A degraded read without a number is a degraded read the caller
+	// cannot act on.
+	EffectiveStalenessBound *durationpb.Duration `protobuf:"bytes,7,opt,name=effective_staleness_bound,json=effectiveStalenessBound,proto3" json:"effective_staleness_bound,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *ReadMeta) Reset() {
@@ -469,6 +476,13 @@ func (x *ReadMeta) GetFillVersion() uint64 {
 		return x.FillVersion
 	}
 	return 0
+}
+
+func (x *ReadMeta) GetEffectiveStalenessBound() *durationpb.Duration {
+	if x != nil {
+		return x.EffectiveStalenessBound
+	}
+	return nil
 }
 
 type WriteMeta struct {
@@ -1437,7 +1451,7 @@ const file_cachet_v2_cachet_proto_rawDesc = "" +
 	"watermarks\x1a=\n" +
 	"\x0fWatermarksEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xf0\x01\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xc7\x02\n" +
 	"\bReadMeta\x12>\n" +
 	"\flevel_served\x18\x01 \x01(\x0e2\x1b.cachet.v2.ConsistencyLevelR\vlevelServed\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12'\n" +
@@ -1445,7 +1459,8 @@ const file_cachet_v2_cachet_proto_rawDesc = "" +
 	"\tcache_hit\x18\x04 \x01(\bR\bcacheHit\x12\x1f\n" +
 	"\vrow_version\x18\x05 \x01(\x04R\n" +
 	"rowVersion\x12!\n" +
-	"\ffill_version\x18\x06 \x01(\x04R\vfillVersion\"\xc1\x01\n" +
+	"\ffill_version\x18\x06 \x01(\x04R\vfillVersion\x12U\n" +
+	"\x19effective_staleness_bound\x18\a \x01(\v2\x19.google.protobuf.DurationR\x17effectiveStalenessBound\"\xc1\x01\n" +
 	"\tWriteMeta\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12'\n" +
@@ -1578,52 +1593,53 @@ var file_cachet_v2_cachet_proto_depIdxs = []int32{
 	3,  // 1: cachet.v2.TableDescriptor.columns:type_name -> cachet.v2.ColumnDescriptor
 	22, // 2: cachet.v2.SessionToken.watermarks:type_name -> cachet.v2.SessionToken.WatermarksEntry
 	0,  // 3: cachet.v2.ReadMeta.level_served:type_name -> cachet.v2.ConsistencyLevel
-	24, // 4: cachet.v2.WriteMeta.effective_staleness_bound:type_name -> google.protobuf.Duration
-	4,  // 5: cachet.v2.HandshakeResponse.tables:type_name -> cachet.v2.TableDescriptor
-	0,  // 6: cachet.v2.GetRequest.level:type_name -> cachet.v2.ConsistencyLevel
-	24, // 7: cachet.v2.GetRequest.staleness_bound:type_name -> google.protobuf.Duration
-	5,  // 8: cachet.v2.GetRequest.session:type_name -> cachet.v2.SessionToken
-	2,  // 9: cachet.v2.GetResponse.row:type_name -> cachet.v2.Row
-	6,  // 10: cachet.v2.GetResponse.meta:type_name -> cachet.v2.ReadMeta
-	5,  // 11: cachet.v2.GetResponse.session:type_name -> cachet.v2.SessionToken
-	0,  // 12: cachet.v2.BatchGetRequest.level:type_name -> cachet.v2.ConsistencyLevel
-	24, // 13: cachet.v2.BatchGetRequest.staleness_bound:type_name -> google.protobuf.Duration
-	5,  // 14: cachet.v2.BatchGetRequest.session:type_name -> cachet.v2.SessionToken
-	23, // 15: cachet.v2.BatchGetResponse.rows:type_name -> cachet.v2.BatchGetResponse.RowsEntry
-	6,  // 16: cachet.v2.BatchGetResponse.meta:type_name -> cachet.v2.ReadMeta
-	5,  // 17: cachet.v2.BatchGetResponse.session:type_name -> cachet.v2.SessionToken
-	2,  // 18: cachet.v2.PutRequest.row:type_name -> cachet.v2.Row
-	5,  // 19: cachet.v2.PutRequest.session:type_name -> cachet.v2.SessionToken
-	7,  // 20: cachet.v2.PutResponse.meta:type_name -> cachet.v2.WriteMeta
-	5,  // 21: cachet.v2.PutResponse.session:type_name -> cachet.v2.SessionToken
-	5,  // 22: cachet.v2.DeleteRequest.session:type_name -> cachet.v2.SessionToken
-	7,  // 23: cachet.v2.DeleteResponse.meta:type_name -> cachet.v2.WriteMeta
-	5,  // 24: cachet.v2.DeleteResponse.session:type_name -> cachet.v2.SessionToken
-	1,  // 25: cachet.v2.Comparison.value:type_name -> cachet.v2.Value
-	1,  // 26: cachet.v2.Assignment.value:type_name -> cachet.v2.Value
-	18, // 27: cachet.v2.UpdateWhereRequest.match:type_name -> cachet.v2.Comparison
-	19, // 28: cachet.v2.UpdateWhereRequest.set:type_name -> cachet.v2.Assignment
-	5,  // 29: cachet.v2.UpdateWhereRequest.session:type_name -> cachet.v2.SessionToken
-	7,  // 30: cachet.v2.UpdateWhereResponse.meta:type_name -> cachet.v2.WriteMeta
-	5,  // 31: cachet.v2.UpdateWhereResponse.session:type_name -> cachet.v2.SessionToken
-	2,  // 32: cachet.v2.BatchGetResponse.RowsEntry.value:type_name -> cachet.v2.Row
-	8,  // 33: cachet.v2.CacheService.Handshake:input_type -> cachet.v2.HandshakeRequest
-	10, // 34: cachet.v2.CacheService.Get:input_type -> cachet.v2.GetRequest
-	12, // 35: cachet.v2.CacheService.BatchGet:input_type -> cachet.v2.BatchGetRequest
-	14, // 36: cachet.v2.CacheService.Put:input_type -> cachet.v2.PutRequest
-	16, // 37: cachet.v2.CacheService.Delete:input_type -> cachet.v2.DeleteRequest
-	20, // 38: cachet.v2.CacheService.UpdateWhere:input_type -> cachet.v2.UpdateWhereRequest
-	9,  // 39: cachet.v2.CacheService.Handshake:output_type -> cachet.v2.HandshakeResponse
-	11, // 40: cachet.v2.CacheService.Get:output_type -> cachet.v2.GetResponse
-	13, // 41: cachet.v2.CacheService.BatchGet:output_type -> cachet.v2.BatchGetResponse
-	15, // 42: cachet.v2.CacheService.Put:output_type -> cachet.v2.PutResponse
-	17, // 43: cachet.v2.CacheService.Delete:output_type -> cachet.v2.DeleteResponse
-	21, // 44: cachet.v2.CacheService.UpdateWhere:output_type -> cachet.v2.UpdateWhereResponse
-	39, // [39:45] is the sub-list for method output_type
-	33, // [33:39] is the sub-list for method input_type
-	33, // [33:33] is the sub-list for extension type_name
-	33, // [33:33] is the sub-list for extension extendee
-	0,  // [0:33] is the sub-list for field type_name
+	24, // 4: cachet.v2.ReadMeta.effective_staleness_bound:type_name -> google.protobuf.Duration
+	24, // 5: cachet.v2.WriteMeta.effective_staleness_bound:type_name -> google.protobuf.Duration
+	4,  // 6: cachet.v2.HandshakeResponse.tables:type_name -> cachet.v2.TableDescriptor
+	0,  // 7: cachet.v2.GetRequest.level:type_name -> cachet.v2.ConsistencyLevel
+	24, // 8: cachet.v2.GetRequest.staleness_bound:type_name -> google.protobuf.Duration
+	5,  // 9: cachet.v2.GetRequest.session:type_name -> cachet.v2.SessionToken
+	2,  // 10: cachet.v2.GetResponse.row:type_name -> cachet.v2.Row
+	6,  // 11: cachet.v2.GetResponse.meta:type_name -> cachet.v2.ReadMeta
+	5,  // 12: cachet.v2.GetResponse.session:type_name -> cachet.v2.SessionToken
+	0,  // 13: cachet.v2.BatchGetRequest.level:type_name -> cachet.v2.ConsistencyLevel
+	24, // 14: cachet.v2.BatchGetRequest.staleness_bound:type_name -> google.protobuf.Duration
+	5,  // 15: cachet.v2.BatchGetRequest.session:type_name -> cachet.v2.SessionToken
+	23, // 16: cachet.v2.BatchGetResponse.rows:type_name -> cachet.v2.BatchGetResponse.RowsEntry
+	6,  // 17: cachet.v2.BatchGetResponse.meta:type_name -> cachet.v2.ReadMeta
+	5,  // 18: cachet.v2.BatchGetResponse.session:type_name -> cachet.v2.SessionToken
+	2,  // 19: cachet.v2.PutRequest.row:type_name -> cachet.v2.Row
+	5,  // 20: cachet.v2.PutRequest.session:type_name -> cachet.v2.SessionToken
+	7,  // 21: cachet.v2.PutResponse.meta:type_name -> cachet.v2.WriteMeta
+	5,  // 22: cachet.v2.PutResponse.session:type_name -> cachet.v2.SessionToken
+	5,  // 23: cachet.v2.DeleteRequest.session:type_name -> cachet.v2.SessionToken
+	7,  // 24: cachet.v2.DeleteResponse.meta:type_name -> cachet.v2.WriteMeta
+	5,  // 25: cachet.v2.DeleteResponse.session:type_name -> cachet.v2.SessionToken
+	1,  // 26: cachet.v2.Comparison.value:type_name -> cachet.v2.Value
+	1,  // 27: cachet.v2.Assignment.value:type_name -> cachet.v2.Value
+	18, // 28: cachet.v2.UpdateWhereRequest.match:type_name -> cachet.v2.Comparison
+	19, // 29: cachet.v2.UpdateWhereRequest.set:type_name -> cachet.v2.Assignment
+	5,  // 30: cachet.v2.UpdateWhereRequest.session:type_name -> cachet.v2.SessionToken
+	7,  // 31: cachet.v2.UpdateWhereResponse.meta:type_name -> cachet.v2.WriteMeta
+	5,  // 32: cachet.v2.UpdateWhereResponse.session:type_name -> cachet.v2.SessionToken
+	2,  // 33: cachet.v2.BatchGetResponse.RowsEntry.value:type_name -> cachet.v2.Row
+	8,  // 34: cachet.v2.CacheService.Handshake:input_type -> cachet.v2.HandshakeRequest
+	10, // 35: cachet.v2.CacheService.Get:input_type -> cachet.v2.GetRequest
+	12, // 36: cachet.v2.CacheService.BatchGet:input_type -> cachet.v2.BatchGetRequest
+	14, // 37: cachet.v2.CacheService.Put:input_type -> cachet.v2.PutRequest
+	16, // 38: cachet.v2.CacheService.Delete:input_type -> cachet.v2.DeleteRequest
+	20, // 39: cachet.v2.CacheService.UpdateWhere:input_type -> cachet.v2.UpdateWhereRequest
+	9,  // 40: cachet.v2.CacheService.Handshake:output_type -> cachet.v2.HandshakeResponse
+	11, // 41: cachet.v2.CacheService.Get:output_type -> cachet.v2.GetResponse
+	13, // 42: cachet.v2.CacheService.BatchGet:output_type -> cachet.v2.BatchGetResponse
+	15, // 43: cachet.v2.CacheService.Put:output_type -> cachet.v2.PutResponse
+	17, // 44: cachet.v2.CacheService.Delete:output_type -> cachet.v2.DeleteResponse
+	21, // 45: cachet.v2.CacheService.UpdateWhere:output_type -> cachet.v2.UpdateWhereResponse
+	40, // [40:46] is the sub-list for method output_type
+	34, // [34:40] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_cachet_v2_cachet_proto_init() }

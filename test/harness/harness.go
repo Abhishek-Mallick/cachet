@@ -115,6 +115,13 @@ type CacheOptions struct {
 	// table would only be one more thing for them to route around.
 	BothTables bool
 
+	// GutterAddresses is the standby pool. Empty leaves the gutter off, which is how a dead cache
+	// node's keys reach the database.
+	GutterAddresses []string
+
+	// GutterTTL bounds how stale a read served from the gutter may be. Zero takes a short default.
+	GutterTTL time.Duration
+
 	// Shards overrides the databases the engine opens. Nil takes DefaultShards.
 	//
 	// The chaos suite sets this to route the engine through Toxiproxy, so a fault can be injected
@@ -238,11 +245,31 @@ func start(ctx context.Context, t *testing.T, cacheClient engine.Cache, opts Cac
 		t.Fatalf("metrics: %v", err)
 	}
 
+	var gutterClient engine.Cache
+	gutterTTL := opts.GutterTTL
+	if len(opts.GutterAddresses) > 0 {
+		if gutterTTL <= 0 {
+			gutterTTL = 30 * time.Second
+		}
+		gc, err := cache.New(ctx, cache.Options{
+			Fingerprint: table.Descriptor().Fingerprint,
+			Addresses:   opts.GutterAddresses,
+			TTL:         gutterTTL,
+		})
+		if err != nil {
+			t.Fatalf("gutter: %v", err)
+		}
+		t.Cleanup(func() { _ = gc.Close() })
+		gutterClient = gc
+	}
+
 	eng, err := engine.New(engine.Options{
 		Metrics:                 metrics,
 		Shards:                  shards,
 		Tables:                  tables,
 		Cache:                   cacheClient,
+		Gutter:                  gutterClient,
+		GutterTTL:               gutterTTL,
 		MaxSessionShards:        64,
 		MaxAffectedKeys:         opts.MaxAffectedKeys,
 		Leases:                  opts.Leases,

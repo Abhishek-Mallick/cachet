@@ -338,6 +338,44 @@ exists to eliminate.
 `TestDegradedFlagIsSurfacedToCaller`, `TestDegradedConvergesWithinCDCLagBound`,
 `TestDegradedWriteStillCommits`, `TestASmallPredicateInvalidatesExactly`.
 
+### 5.1 Reads served from the gutter pool
+
+The second way a response is degraded, and it happens on the READ path.
+
+A circuit breaker protects latency: it stops a dying cache node holding requests open. It does
+nothing for the origin, which receives that node's entire share of the keyspace the moment it stops
+answering — with three cache nodes, a third of all reads arriving at the database at once. The
+**gutter pool** (`cache.gutter`) is a small standby that catches them.
+
+Its entries are **never invalidated**. A write tombstones the home node, and the home node is the one
+that is down, so the gutter's TTL is the whole bound on how stale an entry in it may be:
+
+```
+degraded                  = true
+reason                    = "served from the gutter pool; the home cache node is not answering"
+effective_staleness_bound = cache.gutter.ttl
+```
+
+**What is and is not lost — precisely:**
+
+- **`STRONG` is unaffected.** It never reads a cache of any kind.
+- **`SESSION` survives intact.** Read-own-writes is carried by the **watermark**, not by
+  invalidation: a session that wrote at version `v` rejects any entry filled before `v`, and a
+  gutter entry carries a fill version like any other. This is the third payoff of watermarking on
+  `fv`, and it is the reason a pool nothing invalidates can serve `SESSION` at all.
+- **`BOUNDED(t)` survives intact**, by the same machinery: an entry older than `t` is rejected
+  wherever it lives.
+- **`EVENTUAL` weakens to `BOUNDED(gutter_ttl)`.** It is the level that asks for no freshness, so
+  it is the one the gutter actually changes — and the response says so with the number.
+
+The gutter is consulted **only** when the home node fails to answer, never on a miss. A miss means
+the answer is not cached; serving the gutter then would return an entry the home node had already
+superseded, because the home node is the pool invalidations reach.
+
+**Tests:** `internal/engine/gutter_test.go` and `test/e2e/gutter_test.go` —
+`TestTheSessionWatermarkAppliesToAGutterEntry`, `TestReadOwnWritesSurvivesTheGutter`,
+`TestTheGutterKeepsADeadNodesKeysOffTheDatabase`, `TestAGutterReadSaysItIsDegraded`.
+
 ---
 
 ## 6. What Cachet never guarantees, at any level

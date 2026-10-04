@@ -1,6 +1,7 @@
 package faults_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -69,9 +70,13 @@ func TestUncoveredFaultsAreListedAsOutstanding(t *testing.T) {
 func TestCoverageIsStatedAsAFraction(t *testing.T) {
 	t.Parallel()
 
+	// The denominator comes from the catalogue rather than a literal. A hardcoded one turns every
+	// new fault into a test to update, and the thing worth asserting is that the document states a
+	// FRACTION — the denominator is the honest part of it.
+	want := fmt.Sprintf("1 of %d", len(faults.Catalogue))
 	got := faults.Render(sample())
-	if !strings.Contains(got, "1 of 9") {
-		t.Errorf("coverage is not stated plainly:\n%s", got)
+	if !strings.Contains(got, want) {
+		t.Errorf("coverage is not stated plainly as %q:\n%s", want, got)
 	}
 }
 
@@ -83,8 +88,9 @@ func TestNoRecordsRendersNoClaimOfCoverage(t *testing.T) {
 	if strings.Contains(got, "✅") {
 		t.Errorf("an empty run rendered a tick:\n%s", got)
 	}
-	if !strings.Contains(got, "0 of 9") {
-		t.Errorf("an empty run did not say so plainly:\n%s", got)
+	want := fmt.Sprintf("0 of %d", len(faults.Catalogue))
+	if !strings.Contains(got, want) {
+		t.Errorf("an empty run did not say so plainly as %q:\n%s", want, got)
 	}
 }
 
@@ -100,7 +106,7 @@ func TestARepeatedRunDoesNotInflateCoverage(t *testing.T) {
 
 	got := faults.Render([]faults.Record{rec, second})
 
-	if !strings.Contains(got, "1 of 9") {
+	if want := fmt.Sprintf("1 of %d", len(faults.Catalogue)); !strings.Contains(got, want) {
 		t.Errorf("two records of the same fault were counted as two:\n%s", got)
 	}
 	if strings.Count(got, "## 1. "+rec.Title) != 1 {

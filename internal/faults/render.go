@@ -28,15 +28,16 @@ type Record struct {
 // Without it, a file describing four passing faults reads as completeness. The denominator is the
 // honest part.
 var Catalogue = map[int]string{
-	1: "Cache node killed mid-traffic",
-	2: "Cache node slow, not dead",
-	3: "Cache partitioned from the engine",
-	4: "Valkey evicts under memory pressure",
-	5: "Shard killed mid-transaction",
-	6: "Binlog tailer killed mid-stream",
-	7: "Tailer rewound to an old checkpoint",
-	8: "Clock skew injected between nodes",
-	9: "Lease holder dies during a slow fill",
+	1:  "Cache node killed mid-traffic",
+	2:  "Cache node slow, not dead",
+	3:  "Cache partitioned from the engine",
+	4:  "Valkey evicts under memory pressure",
+	5:  "Shard killed mid-transaction",
+	6:  "Binlog tailer killed mid-stream",
+	7:  "Tailer rewound to an old checkpoint",
+	8:  "Clock skew injected between nodes",
+	9:  "Lease holder dies during a slow fill",
+	10: "A cache node stops answering and its keys would hit the database",
 }
 
 // Render produces FAULTS.md.

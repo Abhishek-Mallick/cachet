@@ -77,7 +77,7 @@ func (v *V2) Get(ctx context.Context, req *cachetv2.GetRequest) (*cachetv2.GetRe
 
 	out := &cachetv2.GetResponse{
 		Found:   res.Found,
-		Meta:    v2ReadMeta(reqmt.Level, res),
+		Meta:    v.readMeta(reqmt.Level, res),
 		Session: sessionToV2(token.Proto()),
 	}
 	if res.Found {
@@ -211,13 +211,22 @@ func (v *V2) key(raw string) (schema.Key, error) {
 	return key, nil
 }
 
-func v2ReadMeta(level consistency.Level, res RowResult) *cachetv2.ReadMeta {
-	return &cachetv2.ReadMeta{
+func (v *V2) readMeta(level consistency.Level, res RowResult) *cachetv2.ReadMeta {
+	meta := &cachetv2.ReadMeta{
 		LevelServed: cachetv2.ConsistencyLevel(level.Proto()),
 		CacheHit:    res.CacheHit,
 		RowVersion:  uint64(res.RowVersion),
 		FillVersion: uint64(res.FillVersion),
 	}
+	if res.FromGutter {
+		// Reported on the response rather than left in a config file. The caller is being served
+		// from a pool nothing invalidates, and the number is the only thing that makes that fact
+		// actionable.
+		meta.Degraded = true
+		meta.DegradedReason = gutterReason
+		meta.EffectiveStalenessBound = durationpb.New(v.e.gutterTTL)
+	}
+	return meta
 }
 
 func rowToProto(row storage.Row) *cachetv2.Row {

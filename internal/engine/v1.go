@@ -122,6 +122,13 @@ func (e *Engine) Get(ctx context.Context, req *cachetv1.GetRequest) (*cachetv1.G
 	} else {
 		out.Meta = readMeta(reqmt.Level, res.RowVersion, res.FillVersion)
 	}
+	if res.FromGutter {
+		// cachet.v1's ReadMeta has no field for a duration, so the bound goes in the reason. A v1
+		// caller still learns that this answer is weaker than the level it asked for, which is the
+		// part it can act on.
+		out.Meta.Degraded = true
+		out.Meta.DegradedReason = fmt.Sprintf("%s (bounded by %s)", gutterReason, e.gutterTTL)
+	}
 	if res.Found {
 		rec, err := rowToV1Record(res.Row)
 		if err != nil {

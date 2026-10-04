@@ -83,6 +83,14 @@ message ReadMeta {
   bool cache_hit = 4;
   uint64 row_version = 5;
   uint64 fill_version = 6;
+
+  // How stale this answer may be, when something about serving it weakened the promise.
+  //
+  // Set when degraded is true and the weakening has a duration — a read served from the gutter
+  // pool while its home cache node is not answering is bounded by the gutter TTL, because nothing
+  // invalidates a gutter entry. A degraded read without a number is a degraded read the caller
+  // cannot act on.
+  google.protobuf.Duration effective_staleness_bound = 7;
 }
 
 message WriteMeta {

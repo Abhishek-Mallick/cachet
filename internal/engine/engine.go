@@ -66,6 +66,17 @@ type Options struct {
 	// which is the baseline every later row in the benchmark table is compared against.
 	Cache Cache
 
+	// Gutter is the standby pool that absorbs a dead cache node's keys.
+	//
+	// Optional. Without it, a node that stops answering sends its entire share of the keyspace to
+	// the database at once — the breaker protects latency, not the origin, and the origin has no
+	// breaker of its own.
+	Gutter Cache
+
+	// GutterTTL is how stale a read served from the gutter may be, and it is reported on every
+	// such response. Nothing invalidates a gutter entry, so this is the whole bound.
+	GutterTTL time.Duration
+
 	// MaxSessionShards caps the size of a session token.
 	MaxSessionShards int
 
@@ -126,6 +137,8 @@ type Engine struct {
 	tableOrder []string
 
 	cache            Cache
+	gutter           Cache
+	gutterTTL        time.Duration
 	maxSessionShards int
 	maxAffectedKeys  int
 	leases           WaitPolicy
@@ -182,6 +195,8 @@ func New(opts Options) (*Engine, error) {
 		tables:           tables,
 		tableOrder:       order,
 		cache:            opts.Cache,
+		gutter:           opts.Gutter,
+		gutterTTL:        opts.GutterTTL,
 		maxSessionShards: maxShards,
 		maxAffectedKeys:  maxAffected,
 		leases:           opts.Leases,
@@ -232,9 +247,9 @@ func (e *Engine) fromCacheOrLease(
 	key string,
 	shardID storage.ShardID,
 	token *consistency.Token,
-) (cache.Entry, bool, string) {
+) (entry cache.Entry, served bool, lease string, gutterPath bool) {
 	if e.cache == nil || req.Level.BypassesCache() {
-		return cache.Entry{}, false, ""
+		return cache.Entry{}, false, "", false
 	}
 
 	// The read is counted whether or not the key is cacheable. That ordering is what makes
@@ -245,13 +260,28 @@ func (e *Engine) fromCacheOrLease(
 		e.admission.RecordRead(key)
 		if !e.admission.ShouldCache(key) {
 			e.metrics.RecordCacheOp("get", "not_admitted")
-			return cache.Entry{}, false, ""
+			return cache.Entry{}, false, "", false
 		}
 	}
 
-	entry, hit, lease := e.readWaitingForAnyFill(ctx, key)
+	entry, hit, lease, unavailable := e.readWaitingForAnyFill(ctx, key)
+
+	// gutterPath is "the home node is not answering", not "the gutter answered". It stays true
+	// through a gutter MISS, and that is the case that matters: the read goes to the origin and its
+	// fill has to land in the standby pool, because filling the node that is down would mean the
+	// next reader of this key reaches the database too, and the one after that.
+	// Only meaningful when a standby exists: an engine without one has no gutter path to take, and
+	// reporting it would put a gutter in metadata nobody configured.
+	gutterPath = unavailable && e.gutter != nil
+	var servedFromGutter bool
+	if !hit && unavailable {
+		if gEntry, gHit := e.readGutter(ctx, key); gHit {
+			entry, hit = gEntry, true
+			servedFromGutter = true
+		}
+	}
 	if !hit {
-		return cache.Entry{}, false, lease
+		return cache.Entry{}, false, lease, gutterPath
 	}
 
 	watermark, known := token.Watermark(string(shardID))
@@ -272,11 +302,51 @@ func (e *Engine) fromCacheOrLease(
 		// A stale hit still has to go to the origin, so it needs a lease for the refill exactly as a
 		// miss does. Without one, a hot key whose watermark has just moved — which is every hot key
 		// immediately after it is written — sends every concurrent reader to the database at once.
-		return cache.Entry{}, false, e.leaseForRefill(ctx, key)
+		//
+		// A stale GUTTER entry gets no lease: the lease lives on the home node, which is the node
+		// that is not answering.
+		if servedFromGutter {
+			return cache.Entry{}, false, "", true
+		}
+		return cache.Entry{}, false, e.leaseForRefill(ctx, key), gutterPath
 	}
 
+	// The freshness rules are the SAME rules, deliberately. A gutter entry carries a fill version
+	// like any other, so SESSION's watermark check and BOUNDED's window both apply to it unchanged
+	// — read-own-writes is carried by the watermark, not by invalidation, which is why it survives
+	// a pool nothing invalidates. What the gutter adds is an upper bound on staleness for the
+	// levels that ask for none, and that bound is reported rather than assumed.
+	if servedFromGutter {
+		e.metrics.RecordCacheOp("gutter", "hit")
+		return entry, true, "", true
+	}
 	e.metrics.RecordCacheOp("get", "hit")
-	return entry, true, ""
+	return entry, true, "", gutterPath
+}
+
+// readGutter consults the standby pool for a key whose home node is not answering.
+//
+// A plain Get rather than GetOrLease: leases are per-key state on the home node, and taking one on
+// the gutter would put the stampede protection in the pool that is standing in for the node the
+// stampede is about.
+func (e *Engine) readGutter(ctx context.Context, key string) (cache.Entry, bool) {
+	if e.gutter == nil {
+		return cache.Entry{}, false
+	}
+
+	entry, hit, err := e.gutter.Get(ctx, key)
+	switch {
+	case err != nil:
+		// The gutter failing is not an error anybody sees: the read falls through to the origin,
+		// which is exactly where it was going before the gutter existed.
+		e.metrics.RecordCacheOp("gutter", "error")
+		e.log.WarnContext(ctx, "gutter read failed; falling through to the origin", "key", key, "err", err)
+		return cache.Entry{}, false
+	case !hit:
+		e.metrics.RecordCacheOp("gutter", "miss")
+		return cache.Entry{}, false
+	}
+	return entry, true
 }
 
 // readWaitingForAnyFill reads the cache, waiting briefly if another caller is already filling.
@@ -285,22 +355,37 @@ func (e *Engine) fromCacheOrLease(
 // token otherwise — including when the wait was exhausted. A caller that waited and gave up still
 // reads the origin: it is served either way, and the only thing it loses is the chance to have been
 // served from someone else's fill.
-func (e *Engine) readWaitingForAnyFill(ctx context.Context, key string) (cache.Entry, bool, string) {
+func (e *Engine) readWaitingForAnyFill(ctx context.Context, key string) (entry cache.Entry, hit bool, lease string, unavailable bool) {
 	for attempt := 0; ; attempt++ {
 		res, err := e.cache.GetOrLease(ctx, key)
 		if err != nil {
 			e.metrics.RecordCacheOp("get", "error")
 			e.log.WarnContext(ctx, "cache read failed; falling through to the origin", "key", key, "err", err)
-			return cache.Entry{}, false, ""
+			// Unavailable, not a miss. The difference is the whole reason a gutter can exist: a
+			// miss means the answer is not cached, and an unanswering node means a third of the
+			// keyspace is about to arrive at the database simultaneously.
+			return cache.Entry{}, false, "", true
 		}
 
 		switch res.Outcome {
 		case cache.LeaseHit:
-			return res.Entry, true, ""
+			return res.Entry, true, "", false
 		case cache.LeaseGranted:
 			e.metrics.RecordCacheOp("get", "miss")
 			e.metrics.RecordLease("granted")
-			return cache.Entry{}, false, res.Token
+			return cache.Entry{}, false, res.Token, false
+		case cache.LeaseShed:
+			// The breaker is shedding this node, which is the clearest statement available that it
+			// is not answering. Unavailable rather than a miss: waiting would spend the lease
+			// backoff on a node nothing contacted, and a miss would send the read to the database
+			// without ever consulting the standby pool — at the exact moment the pool exists for.
+			//
+			// Counted separately from an error, because they are different operational facts: an
+			// error is a node that failed a request, a shed is a node the breaker decided not to
+			// ask. A dashboard that could not tell them apart would report an outage as a cold
+			// cache.
+			e.metrics.RecordCacheOp("get", "shed")
+			return cache.Entry{}, false, "", true
 		}
 
 		// LeaseWait: somebody else is filling this key.
@@ -310,17 +395,53 @@ func (e *Engine) readWaitingForAnyFill(ctx context.Context, key string) (cache.E
 			// system is a self-inflicted outage. Read the origin instead.
 			e.metrics.RecordCacheOp("get", "miss")
 			e.metrics.RecordLease("wait_exhausted")
-			return cache.Entry{}, false, ""
+			return cache.Entry{}, false, "", false
 		}
 
 		select {
 		case <-ctx.Done():
 			e.metrics.RecordLease("wait_cancelled")
-			return cache.Entry{}, false, ""
+			return cache.Entry{}, false, "", false
 		case <-time.After(e.leases.Backoff(attempt)):
 		}
 		e.metrics.RecordLease("waited")
 	}
+}
+
+// tombstoneGutter invalidates a standby entry after the home node refused the tombstone.
+func (e *Engine) tombstoneGutter(ctx context.Context, key string, version storage.Version) {
+	if e.gutter == nil {
+		return
+	}
+	if _, err := e.gutter.Tombstone(ctx, key, uint64(version)); err != nil {
+		e.metrics.RecordCacheOp("gutter", "error")
+		return
+	}
+	e.metrics.RecordCacheOp("gutter", "tombstone")
+}
+
+// gutterReason is the exact wording a caller sees when their read was served from the standby pool.
+const gutterReason = "served from the gutter pool; the home cache node is not answering"
+
+// fillGutter writes an entry into the standby pool.
+//
+// No lease and no compare-and-set token: the gutter is a best-effort pool whose entries nothing
+// invalidates, and the machinery that makes a primary fill safe against a concurrent write lives
+// on the node that is not answering. What bounds a gutter entry is its TTL, which is set when the
+// pool is built.
+//
+// Failures are logged and dropped. The caller already has the right answer from the database, and
+// the gutter exists to reduce origin load rather than to be another thing that can fail a request.
+func (e *Engine) fillGutter(ctx context.Context, key string, entry cache.Entry) {
+	if e.gutter == nil {
+		return
+	}
+	if _, err := e.gutter.Fill(ctx, key, entry); err != nil {
+		e.metrics.RecordCacheOp("gutter", "error")
+		e.log.WarnContext(ctx, "gutter fill failed", "key", key, "err", err)
+		return
+	}
+	e.metrics.RecordCacheOp("gutter", "fill")
 }
 
 // leaseForRefill takes a lease for a refill that a freshness rejection made necessary.
@@ -347,7 +468,7 @@ func (e *Engine) leaseForRefill(ctx context.Context, key string) string {
 // bypassing the cache entirely. It is only safe because an insert invalidates the negative entry
 // through the same compare-and-set as any other write, which is what gives read-own-inserts.
 func (e *Engine) fillNegative(ctx context.Context, key string, fillVersion storage.Version) {
-	e.fillNegativeHoldingLease(ctx, key, fillVersion, "")
+	e.fillNegativeHoldingLease(ctx, key, fillVersion, "", false)
 }
 
 // fillNegativeHoldingLease is fillNegative by a caller holding the key's lease.
@@ -355,16 +476,25 @@ func (e *Engine) fillNegative(ctx context.Context, key string, fillVersion stora
 // Absence is filled under a lease exactly like a value: a key that does not exist is just as
 // capable of being stampeded as one that does, and a workload probing for missing rows is the case
 // negative caching was built for in the first place.
-func (e *Engine) fillNegativeHoldingLease(ctx context.Context, key string, fillVersion storage.Version, lease string) {
+func (e *Engine) fillNegativeHoldingLease(ctx context.Context, key string, fillVersion storage.Version, lease string, toGutter bool) {
 	if e.cache == nil {
 		return
 	}
-	e.applyFill(ctx, key, cache.Entry{
+	entry := cache.Entry{
 		// A negative entry has no row version of its own — no row was read. The fill version is
 		// what dates it, and it is the fill version every freshness rule consults anyway.
 		FillVersion: uint64(fillVersion),
 		Negative:    true,
-	})
+	}
+	if toGutter {
+		// Absence is as worth absorbing as a value: a workload probing for missing rows is the case
+		// negative caching exists for, and it is the case that would otherwise hit the database
+		// once per probe while the home node is down.
+		e.fillGutter(ctx, key, entry)
+		return
+	}
+	_ = lease
+	e.applyFill(ctx, key, entry)
 }
 
 func (e *Engine) applyFill(ctx context.Context, key string, entry cache.Entry) {
@@ -410,6 +540,12 @@ func (e *Engine) invalidate(ctx context.Context, key string, version storage.Ver
 	applied, err := e.cache.Tombstone(ctx, key, uint64(version))
 	switch {
 	case err != nil:
+		// The home node did not take the tombstone, which is also the condition under which reads
+		// are being served from the gutter — so this is exactly when the gutter can be holding a
+		// value this write supersedes. Tombstoning it here rather than on every write keeps the
+		// common path at one round trip: a pool that is almost never read does not need to be
+		// invalidated almost always.
+		e.tombstoneGutter(ctx, key, version)
 		// The write is already committed and durable; the row is correct in the database. What is
 		// lost is the synchronous invalidation, so the key falls back to CDC — bounded by the
 		// tailer's lag rather than immediate. That is a degradation to report, not a reason to fail

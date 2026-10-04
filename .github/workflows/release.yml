@@ -165,6 +165,25 @@ jobs:
           helm template rel deploy/helm/cachet > /dev/null
           helm template rel deploy/helm/cachet --set topology=service --set sextant.enabled=true > /dev/null
 
+      # Rendering is not the check that matters. The chart rendered perfectly for months while
+      # emitting a shard shape Cachet's loader does not accept and naming Secret variables it does
+      # not read, so this feeds the rendered ConfigMap to the real loader.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: the rendered config must load
+        run: |
+          set -euo pipefail
+          helm template rel deploy/helm/cachet \
+            --set-json 'shards=[{"id":"shard0","host":"mysql-0","database":"app"}]' \
+            --set-json 'topologies=[{"name":"main","shards":["shard0"]}]' \
+            --set-json 'tables=[{"name":"entities","topology":"main","primary_key":["id"],"version_column":"version","columns":[{"name":"id","type":"uint64"},{"name":"tenant_id","type":"uint32"},{"name":"status","type":"uint8"},{"name":"payload","type":"bytes"},{"name":"version","type":"uint64"}]}]' \
+            --set-json 'cache={"addresses":["valkey-0:6379"],"ttl":"5m"}' \
+            > /tmp/rendered.yaml
+          go run ./cmd/cachetctl config check --rendered /tmp/rendered.yaml
+
       - name: package and push
         if: github.event_name == 'push'
         env:

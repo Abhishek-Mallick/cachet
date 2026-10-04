@@ -42,6 +42,7 @@ commands:
   admission explain <key>    why a key is or is not being cached
   bench quick                a 30-second smoke benchmark against a live cluster
   config migrate             add the table declaration Cachet used to compile in
+  config check               load the config a rendered Helm chart produces
 
 every command accepts -config <path> and -json.
 `
@@ -339,7 +340,13 @@ func checkpointCmd(args []string) error {
 // is why it does not use load(): a file that needs migrating is by definition one that no longer
 // validates, so loading it first would refuse to do the thing that fixes it.
 func configCmd(args []string) error {
-	if len(args) == 0 || args[0] != "migrate" {
+	if len(args) == 0 {
+		return errors.New("usage: cachetctl config migrate|check")
+	}
+	if args[0] == "check" {
+		return configCheckCmd(args[1:])
+	}
+	if args[0] != "migrate" {
 		return errors.New("usage: cachetctl config migrate -config <path> [-w]")
 	}
 
@@ -382,6 +389,38 @@ func configCmd(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "cachetctl: declared table `entities` in %s\n", *configPath)
 	return nil
+}
+
+// configCheckCmd loads the config a rendered Helm chart produces.
+//
+// `helm lint` and `helm template` ask whether a chart RENDERS. This asks the only question that
+// matters afterwards — whether Cachet would accept what came out — using the same loader the
+// engine uses, so the two cannot disagree.
+func configCheckCmd(args []string) error {
+	fs := flag.NewFlagSet("config check", flag.ContinueOnError)
+	rendered := fs.String("rendered", "", "path to the output of `helm template`")
+	asJSON := fs.Bool("json", false, "emit JSON")
+	if _, err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	if *rendered == "" {
+		return errors.New("cachetctl config check: -rendered <path> is required")
+	}
+
+	// The variables the chart's Deployment mounts from a Secret. Supplied here so the check fails
+	// on the config's SHAPE rather than on credentials this command was never given.
+	env := envMap()
+	for _, name := range []string{"CACHET_DB_USERNAME", "CACHET_DB_PASSWORD"} {
+		if _, ok := env[name]; !ok {
+			env[name] = "checked-by-cachetctl"
+		}
+	}
+
+	report, err := ctl.CheckRendered(*rendered, env)
+	if err != nil {
+		return err
+	}
+	return emit(report, *asJSON)
 }
 
 func admissionCmd(args []string) error {

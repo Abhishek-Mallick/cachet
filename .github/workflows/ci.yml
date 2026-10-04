@@ -154,16 +154,16 @@ jobs:
         run: |
           set -euo pipefail
           make faults
-          if ! grep -q '^\*\*Coverage: 9 of 9\.\*\*$' FAULTS.md; then
+          if ! grep -q '^\*\*Coverage: 10 of 10\.\*\*$' FAULTS.md; then
             echo "::error::FAULTS.md does not report full coverage after a passing chaos run."
             grep -n 'Coverage:' FAULTS.md || true
             exit 1
           fi
-          for n in 1 2 3 4 5 6 7 8 9; do
+          for n in 1 2 3 4 5 6 7 8 9 10; do
             grep -q "^| $n | ✅ " FAULTS.md || {
               echo "::error::fault $n has no entry in FAULTS.md"; exit 1; }
           done
-          echo "FAULTS.md covers all 9 faults"
+          echo "FAULTS.md covers all 10 faults"
 
       # The generated document is committed, so a regeneration that changes its STRUCTURE — a new
       # fault, a renamed one — has to be committed too. Evidence-only churn is expected and ignored.

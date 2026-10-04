@@ -363,6 +363,15 @@ const (
 	// LeaseWait means another caller is already filling. The right response is to wait briefly and
 	// look again — and, if that does not resolve, to read the origin directly rather than block.
 	LeaseWait
+
+	// LeaseShed means the breaker is shedding this node: nothing was asked of it.
+	//
+	// Distinct from LeaseWait, which it used to be reported as, and the difference matters twice
+	// over. Waiting is the wrong response — nobody is filling, and the backoff is spent on a node
+	// that was deliberately not contacted. And a shed read is the strongest available evidence that
+	// a node is not answering, which is exactly when a standby pool should be consulted; folding it
+	// into "wait" hid that signal at the moment it was most useful.
+	LeaseShed
 )
 
 func (o LeaseOutcome) String() string {
@@ -373,6 +382,8 @@ func (o LeaseOutcome) String() string {
 		return "granted"
 	case LeaseWait:
 		return "wait"
+	case LeaseShed:
+		return "shed"
 	default:
 		return "unknown"
 	}
@@ -407,7 +418,7 @@ func (c *Client) GetOrLease(ctx context.Context, key string) (LeaseResult, error
 
 	b := c.breakers.For(node)
 	if !b.Allow() {
-		return LeaseResult{Outcome: LeaseWait}, nil
+		return LeaseResult{Outcome: LeaseShed}, nil
 	}
 
 	token, err := newLeaseToken()

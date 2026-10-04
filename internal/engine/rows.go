@@ -36,6 +36,11 @@ type RowResult struct {
 	// Entry is the cache entry that served the read, when CacheHit is true. It carries the
 	// degradation metadata the response reports.
 	Entry cache.Entry
+
+	// FromGutter reports that the home cache node was not answering, so this read was served from —
+	// or filled into — the standby pool. Nothing invalidates a gutter entry, so a read it served
+	// is bounded by the gutter TTL and the response has to say so.
+	FromGutter bool
 }
 
 // GetRow reads one row, from the cache when the requested level allows it.
@@ -49,7 +54,7 @@ func (e *Engine) GetRow(ctx context.Context, key schema.Key, reqmt consistency.R
 		return RowResult{}, err
 	}
 
-	entry, served, lease := e.fromCacheOrLease(ctx, reqmt, key.String(), id, token)
+	entry, served, lease, gutterPath := e.fromCacheOrLease(ctx, reqmt, key.String(), id, token)
 	if served {
 		token.Advance(string(id), entry.RowVersion)
 		row, err := t.d.DecodeRow(entry.Row)
@@ -67,6 +72,10 @@ func (e *Engine) GetRow(ctx context.Context, key schema.Key, reqmt consistency.R
 				FillVersion: storage.Version(entry.FillVersion),
 				CacheHit:    true,
 				Entry:       entry,
+				// Only a SERVED entry is degraded. gutterPath is also true when the standby missed
+				// and the read is about to go to the origin, and an origin read is the freshest
+				// answer there is — marking it degraded would be a warning about nothing.
+				FromGutter: gutterPath,
 			}, nil
 		}
 	}
@@ -81,7 +90,7 @@ func (e *Engine) GetRow(ctx context.Context, key schema.Key, reqmt consistency.R
 		// Nothing advances here: an absent row has no version, so there is no version a later read
 		// of this key could move backwards from. Read-own-inserts is carried by the INSERT
 		// advancing the watermark, not by this read.
-		e.fillNegativeHoldingLease(ctx, key.String(), fill, lease)
+		e.fillNegativeHoldingLease(ctx, key.String(), fill, lease, gutterPath)
 		return RowResult{FillVersion: fill}, nil
 	case err != nil:
 		return RowResult{}, err
@@ -107,8 +116,12 @@ func (e *Engine) GetRow(ctx context.Context, key schema.Key, reqmt consistency.R
 	// watermark, and an entry filled after the newest row version this session has observed cannot
 	// be hiding a write the session has already seen.
 	token.Advance(string(id), uint64(version))
-	e.fillRowHoldingLease(ctx, t, key.String(), row, version, fill, lease)
+	// Filled into whichever pool is answering. With the home node down the entry goes to the
+	// gutter, which is what stops the NEXT reader of this key reaching the database too.
+	e.fillRowHoldingLease(ctx, t, key.String(), row, version, fill, lease, gutterPath)
 
+	// Not degraded: this answer came from the database, which is the freshest thing there is. What
+	// the gutter changed is where the FILL went, not what the caller was told.
 	return RowResult{Found: true, Row: row, RowVersion: version, FillVersion: fill}, nil
 }
 
@@ -339,12 +352,12 @@ func (e *Engine) UpdateRowsWhere(ctx context.Context, tableName string, match, s
 
 // fillRow caches a row read from the origin.
 func (e *Engine) fillRow(ctx context.Context, t *table, key string, row storage.Row, version, fillVersion storage.Version) {
-	e.fillRowHoldingLease(ctx, t, key, row, version, fillVersion, "")
+	e.fillRowHoldingLease(ctx, t, key, row, version, fillVersion, "", false)
 }
 
 // fillRowHoldingLease is fillRow by a caller that was granted the lease for this key, which the
 // fill hands back. An empty token means no lease was held.
-func (e *Engine) fillRowHoldingLease(ctx context.Context, t *table, key string, row storage.Row, version, fillVersion storage.Version, lease string) {
+func (e *Engine) fillRowHoldingLease(ctx context.Context, t *table, key string, row storage.Row, version, fillVersion storage.Version, lease string, toGutter bool) {
 	if e.cache == nil {
 		return
 	}
@@ -355,11 +368,16 @@ func (e *Engine) fillRowHoldingLease(ctx context.Context, t *table, key string, 
 		e.log.WarnContext(ctx, "cache fill skipped; the row did not encode", "key", key, "err", err)
 		return
 	}
-	e.applyFillHoldingLease(ctx, key, cache.Entry{
+	entry := cache.Entry{
 		RowVersion:  uint64(version),
 		FillVersion: uint64(fillVersion),
 		Row:         encoded,
-	}, lease)
+	}
+	if toGutter {
+		e.fillGutter(ctx, key, entry)
+		return
+	}
+	e.applyFillHoldingLease(ctx, key, entry, lease)
 }
 
 // rowVersion reads a row's version column.

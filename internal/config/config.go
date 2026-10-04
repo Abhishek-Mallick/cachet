@@ -74,6 +74,37 @@ type Cache struct {
 	// what Cachet promises about staleness. A shed read is served from the database, which is at
 	// least as fresh as the cache would have been.
 	Breaker Breaker `koanf:"breaker"`
+
+	// Gutter is the standby pool that absorbs a dead node's keys.
+	Gutter Gutter `koanf:"gutter"`
+}
+
+// Gutter is a small standby pool that catches the keys of a cache node that is not answering.
+//
+// The circuit breaker protects LATENCY: it stops a dying node from holding requests open. It does
+// nothing for the ORIGIN, which receives that node's entire share of the keyspace the moment the
+// node stops answering. With three cache nodes that is a third of all reads arriving at the
+// database at once, and the database does not have a breaker.
+//
+// The gutter is memcache's answer (NSDI '13 §3.4) and it is the difference between a degraded cache
+// and a database incident. Entries written to it carry a SHORT TTL and are never invalidated — the
+// write path tombstones the home node, which is the node that is down — so the TTL is their
+// staleness bound, and a read served from the gutter says so.
+type Gutter struct {
+	// Addresses are the standby nodes. Empty disables the gutter, and then a dead node's keys go
+	// to the database exactly as they did before.
+	//
+	// They must not overlap the primary addresses: a gutter on the same node as the cache is no
+	// gutter at all, because the failure that emptied one emptied the other.
+	Addresses []string `koanf:"addresses"`
+
+	// TTL is how long a gutter entry lives, and therefore how stale a read served from it may be.
+	//
+	// Short on purpose. Nothing invalidates a gutter entry, so this is the entire bound — and it is
+	// reported on every response the gutter serves rather than left in a config file. Long enough
+	// to absorb an outage, short enough that the staleness it admits is one somebody would accept
+	// knowingly.
+	TTL time.Duration `koanf:"ttl"`
 }
 
 // Admission configures the per-key read:write admission policy.
@@ -260,6 +291,11 @@ func Default() Config {
 				WaitBackoff:    5 * time.Millisecond,
 				WaitBackoffMax: 50 * time.Millisecond,
 			},
+			Gutter: Gutter{
+				// Off by default. It needs nodes nobody has yet, and a gutter pointed at the
+				// pool it stands by for would be worse than none — it would look like protection.
+				TTL: 30 * time.Second,
+			},
 			Breaker: Breaker{
 				Window:       10 * time.Second,
 				Buckets:      10,
@@ -395,6 +431,9 @@ func (c Config) Validate() error {
 	if err := c.Cache.Breaker.validate(); err != nil {
 		return err
 	}
+	if err := c.Cache.Gutter.validate(c.Cache.Addresses); err != nil {
+		return err
+	}
 
 	if _, err := consistency.ParseLevel(c.DefaultLevel); err != nil {
 		return fmt.Errorf("config: default_level: %w", err)
@@ -477,6 +516,45 @@ func (b Breaker) validate() error {
 		// At 1.0 the node is never called again, so recovery can never be observed and the breaker
 		// latches open until the process restarts — a self-inflicted outage outliving its cause.
 		return fmt.Errorf("config: cache.breaker.max_shed must be in [0,1), got %v", b.MaxShed)
+	}
+	return nil
+}
+
+// validate checks the gutter against the pool it stands by for.
+func (g Gutter) validate(primary []string) error {
+	if len(g.Addresses) == 0 {
+		return nil
+	}
+	if len(primary) == 0 {
+		return errors.New("config: cache.gutter is configured with no cache.addresses; " +
+			"there is no pool for it to stand by for")
+	}
+	if g.TTL <= 0 {
+		// Nothing invalidates a gutter entry, so the TTL is the only thing bounding its staleness.
+		// A zero would mean unbounded, which is the one thing this pool must not be.
+		return fmt.Errorf("config: cache.gutter.ttl must be positive, got %s", g.TTL)
+	}
+
+	inPrimary := make(map[string]struct{}, len(primary))
+	for _, addr := range primary {
+		inPrimary[addr] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(g.Addresses))
+	for i, addr := range g.Addresses {
+		if addr == "" {
+			return fmt.Errorf("config: cache.gutter.addresses[%d] is empty", i)
+		}
+		if _, dup := seen[addr]; dup {
+			return fmt.Errorf("config: duplicate gutter address %q", addr)
+		}
+		seen[addr] = struct{}{}
+		if _, clash := inPrimary[addr]; clash {
+			// The whole point is to survive a node that is not answering. Standing by on that same
+			// node means the failure which emptied the cache emptied the gutter with it, and the
+			// configuration would look like protection while providing none.
+			return fmt.Errorf("config: %q is both a cache node and a gutter node; "+
+				"a gutter on the pool it stands by for does not survive the failure it exists for", addr)
+		}
 	}
 	return nil
 }

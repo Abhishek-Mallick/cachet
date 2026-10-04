@@ -58,13 +58,18 @@ sextant:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: 500m, memory: 256Mi }
 
-# Shard DSNs. Credentials belong in a Secret you create; reference it here rather than putting a
-# password in values.
+# The database shards. Credentials are NOT here and cannot be: the chart renders a DSN naming the
+# environment variables it mounts from `existingSecret`, and Cachet refuses to start if one is
+# unset. A password in values.yaml would end up in the ConfigMap and in `helm get values`.
 shards: []
 #  - id: shard0
 #    host: mysql-0.mysql
 #    port: 3306
 #    database: app
+#    # Optional DSN query parameters. Note that parseTime is forced off whatever you write here:
+#    # with it on the driver returns its OWN rendering of a DATETIME rather than the bytes MySQL
+#    # sent, and a cache entry would hold a string the database never produces.
+#    params: "timeout=5s"
 
 # What Cachet caches. There is no default and no built-in table: the cacheable set is an operator's
 # decision with consistency consequences, so it is declared rather than discovered.

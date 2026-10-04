@@ -135,10 +135,38 @@ func run() error {
 		log.Warn("no cache configured; every read will reach the database")
 	}
 
+	// The standby pool that catches a dead node's keys. Optional, and when it is absent a node that
+	// stops answering sends its whole share of the keyspace to the database exactly as before.
+	var gutterClient engine.Cache
+	if cacheClient != nil && len(cfg.Cache.Gutter.Addresses) > 0 {
+		gc, err := cache.New(ctx, cache.Options{
+			Fingerprint: descriptors[0].Fingerprint,
+			Addresses:   cfg.Cache.Gutter.Addresses,
+			// The gutter's OWN ttl, not the entry ttl. Nothing invalidates a gutter entry, so this
+			// is the whole bound on how stale a read it serves may be.
+			TTL:      cfg.Cache.Gutter.TTL,
+			LeaseTTL: cfg.Cache.Lease.TTL,
+			Breaker:  breakerOptions(cfg.Cache.Breaker),
+		})
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := gc.Close(); err != nil {
+				log.Warn("closing gutter failed", "err", err)
+			}
+		}()
+		gutterClient = gc
+		log.Info("gutter pool connected",
+			"addresses", cfg.Cache.Gutter.Addresses, "ttl", cfg.Cache.Gutter.TTL)
+	}
+
 	eng, err := engine.New(engine.Options{
 		Shards:           shards,
 		Tables:           tables,
 		Cache:            cacheClient,
+		Gutter:           gutterClient,
+		GutterTTL:        cfg.Cache.Gutter.TTL,
 		MaxSessionShards: cfg.Consistency.MaxSessionShards,
 		MaxAffectedKeys:  cfg.Consistency.MaxAffectedKeys,
 		Admission:        admissionController(cfg.Cache.Admission, log),

@@ -61,6 +61,13 @@ func Load(path string, env map[string]string) (Config, error) {
 		return Config{}, fmt.Errorf("config: decode: %w", err)
 	}
 
+	// Before validation, because a DSN that still reads `${CACHET_DB_PASSWORD}` is not a DSN and
+	// the error an operator wants is the one naming the variable, not the one MySQL returns twenty
+	// seconds later.
+	if err := out.expandDSNs(env); err != nil {
+		return Config{}, err
+	}
+
 	if err := out.Validate(); err != nil {
 		return Config{}, err
 	}
